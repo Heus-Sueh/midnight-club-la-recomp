@@ -1,0 +1,4 @@
+interface:
+  display_name: "Recomp Performance Debugging"
+  short_description: "Profile FPS, stutter, crashes, and GPU stalls"
+  default_prompt: "Use $recomp-performance-debugging to measure and diagnose this recomp performance or stability issue with reproducible evidence."

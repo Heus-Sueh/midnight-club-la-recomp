@@ -18,6 +18,9 @@ Maintain one portable host architecture rather than parallel Windows and Linux f
 
 Read [build-and-runtime.md](references/build-and-runtime.md) when editing presets, CMake, app startup, or package layout. Read [cross-platform-verification.md](references/cross-platform-verification.md) for CI and release acceptance. Read [native-renderer-architecture.md](references/native-renderer-architecture.md) for native renderer patterns (Skate3, Dante's Inferno, Unleashed), presentation pipelines, and GPU interop.
 
+Use `$recomp-performance-debugging` when Vulkan initializes but the remaining
+symptom is low FPS, stutter, a PM4/backend failure, or uncertain frame pacing.
+
 ## Review rules
 
 - Keep common behavior in common source. Use `#if` only for unavoidable OS APIs and keep it local.

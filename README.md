@@ -48,6 +48,16 @@ ReXGlue currently reports 20 `Unexpected float16_4 pack instruction` warnings
 during code generation. Treat them as a known correctness risk until those PPC
 instructions are identified and tested.
 
+Analyze comparable presentation logs without ad-hoc parsing:
+
+```sh
+python scripts/analyze_present_log.py /path/to/run.log --warmup-seconds 5
+```
+
+The tool reports average FPS, median, p95/p99, maximum interval and hitch counts.
+The current controlled baseline and its limitations are recorded in
+`docs/investigations/performance-baseline-2026-09-07.md`.
+
 ## Prerequisites
 
 - Git

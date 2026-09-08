@@ -23,6 +23,10 @@ Work from evidence tied to one exact executable revision. The goal is the smalle
 
 Read [investigation-playbook.md](references/investigation-playbook.md) for the evidence checklist and remedy hierarchy. Read [revision-and-hook-rules.md](references/revision-and-hook-rules.md) before adding any address, mid-assembly hook, generated patch, or title-update variant.
 
+For FPS regressions, timing patches, profiler captures, debugger-only signals,
+or ambiguity between guest and GPU/runtime behavior, use
+`$recomp-performance-debugging` before deciding on an address-bearing remedy.
+
 ## Guardrails
 
 - Never invent an address, function boundary, register contract, or struct layout.
