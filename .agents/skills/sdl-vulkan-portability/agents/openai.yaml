@@ -1,0 +1,4 @@
+interface:
+  display_name: "SDL Vulkan Portability"
+  short_description: "Keep Windows and Linux on SDL3 Vulkan"
+  default_prompt: "Use $sdl-vulkan-portability to implement or review a Windows and Linux SDL3/Vulkan change."

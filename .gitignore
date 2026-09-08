@@ -1,0 +1,23 @@
+# User-owned Xbox 360 content and derived recompilation output.
+/game/
+/generated/
+*.iso
+*.ISO
+
+# Local SDK/build artifacts.
+/thirdparty/rexglue-sdk/
+/out/
+/build/
+/.venv/
+
+# Python test caches.
+__pycache__/
+*.py[cod]
+
+# Extracted shader dumps and catalogs (user-owned game content)
+/shaders_dump/
+*.ucode*
+shaders_catalog*.json
+*.xpso
+*.xsh
+/cache/

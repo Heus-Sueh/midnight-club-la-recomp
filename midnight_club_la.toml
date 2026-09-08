@@ -1,0 +1,90 @@
+# midnight_club_la runtime configuration
+# This file allows tuning performance, display, graphics, and input.
+
+# Display & Windowing
+window_width = 1920
+window_height = 1080
+video_mode_width = 1280
+video_mode_height = 720
+fullscreen = false
+
+# Graphics & Performance
+# Disable vertical sync to eliminate artificial frame-rate clamping
+vsync = false
+
+# Lock-free hardware clock timing (eliminates tick_mutex contention on mftb timebase loops)
+clock_no_scaling = false
+clock_source_raw = false
+
+# Asynchronous shader compilation in background threads
+async_shader_compilation = true
+vulkan_pipeline_creation_threads = 4
+
+
+# Do not drop entire frames while async placeholder shaders are compiling
+vulkan_async_skip_incomplete_frames = true
+
+# Allow invalid texture fetch constants commonly encountered in MCLA
+gpu_allow_invalid_fetch_constants = true
+
+# EDRAM Emulation: "fbo" uses standard Vulkan framebuffer objects with hardware ROP blending
+render_target_path_vulkan = "fbo"
+
+# Zero host readback stalls (GPU command processing stays fully asynchronous)
+readback_resolve = "none"
+vulkan_readback_resolve = false
+readback_memexport = false
+vulkan_readback_memexport = false
+
+# Eliminate per-frame memory page state validation overhead
+# MCLA's tested fast path. Set true first when diagnosing GPU-written guest
+# memory corruption; it costs roughly 9% in the current boot-scene benchmark.
+clear_memory_page_state = false
+
+# Shader dump toggle (set to "shaders_dump" to dump microcode shaders for AOT compilation)
+# dump_shaders = "shaders_dump"
+
+# Input backend
+input_backend = "sdl"
+
+# Logging: warn level prevents I/O disk stalls during gameplay
+log_level = "warn"
+
+# Filesystem & VFS: allow game-relative writes to avoid failed IO checks
+allow_game_relative_writes = true
+
+# Native Renderer & Presentation Controls
+# Enable native renderer & presentation pipeline
+mcla_use_native_renderer = true
+
+# Display and internal render resolution preset: 720p, 1080p, 1440p, 4k
+mcla_resolution = "1080p"
+
+# Keep the stock 30 FPS simulation cadence. The host can render this boot scene
+# substantially faster, but uncapped presentation accelerates guest timing and
+# the experimental 60 FPS simulation patches regress this revision.
+mcla_target_fps = 30.0
+
+# Smooth motion pacing to eliminate display judder
+mcla_smooth_motion = true
+
+# Native render resolution scale multiplier (1 = native, 2 = 2x super-sampling)
+mcla_resolution_scale = 1
+
+# Target aspect ratio: 0.0 = auto 16:9, 2.333 = 21:9 Ultrawide, 3.555 = 32:9 Super-Ultrawide
+mcla_aspect_ratio = 0.0
+
+# Fragment Shader Interlock (ROV) path
+mcla_use_fsi = false
+
+
+# Dump RAGE microcode shaders to shaders_dump/ (set to true to dump newly encountered shaders)
+mcla_dump_shaders = false
+
+# Experimental camera sampling is disabled until the sampled pose is consumed
+# by a native render path.
+mcla_interpolate_camera = false
+
+# Presenter Effect (bilinear filter)
+present_effect = "bilinear"
+present_letterbox = true

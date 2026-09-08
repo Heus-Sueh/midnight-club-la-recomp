@@ -1,0 +1,20 @@
+diff --git i/src/graphics/vulkan/pipeline_cache.cpp w/src/graphics/vulkan/pipeline_cache.cpp
+index 91ac08f..00fbeb3 100644
+--- i/src/graphics/vulkan/pipeline_cache.cpp
++++ w/src/graphics/vulkan/pipeline_cache.cpp
+@@ -1246,6 +1246,15 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
+     return false;
+   }
+ 
++  // Dump translated SPIR-V binary if desired (D3D12 parity).
++  if (!REXCVAR_GET(dump_shaders).empty()) {
++    bool edram_fsi_used =
++        render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
++    translation.Dump(REXCVAR_GET(dump_shaders), (shader.type() == xenos::ShaderType::kPixel)
++                                                    ? (edram_fsi_used ? "vk_fsi" : "vk_fbo")
++                                                    : "vk");
++  }
++
+   // TODO(Triang3l): Log that the shader has been successfully translated in
+   // common code.
+ 

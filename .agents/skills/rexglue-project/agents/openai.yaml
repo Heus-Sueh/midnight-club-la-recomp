@@ -1,0 +1,4 @@
+interface:
+  display_name: "ReXGlue Project"
+  short_description: "Scaffold and maintain a ReXGlue recomp"
+  default_prompt: "Use $rexglue-project to scaffold or update this ReXGlue recompilation project."

@@ -1,0 +1,105 @@
+diff --git a/src/core/memory_posix.cpp b/src/core/memory_posix.cpp
+index b52bf39..863afb0 100644
+--- a/src/core/memory_posix.cpp
++++ b/src/core/memory_posix.cpp
+@@ -483,16 +483,23 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
+     shm_unlink(full_path.c_str());
+     return kFileMappingHandleInvalid;
+   }
++
++  // The mapping is private to this process and all views are created from the
++  // descriptor below, so it never needs to be reopened by name. Unlink it now
++  // while keeping the descriptor alive. This lets the kernel reclaim the
++  // object after an abort or hard exit instead of leaving multi-gigabyte sparse
++  // xenia_memory_* objects resident in /dev/shm.
++  if (shm_unlink(full_path.c_str()) != 0) {
++    close(ret);
++    return kFileMappingHandleInvalid;
++  }
+   return static_cast<FileMappingHandle>(ret);
+ #endif
+ }
+ 
+ void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::path& path) {
++  static_cast<void>(path);
+   close(static_cast<int>(handle));
+-#if !REX_PLATFORM_ANDROID
+-  auto full_path = MakeShmName(path);
+-  shm_unlink(full_path.c_str());
+-#endif
+ }
+ 
+ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, PageAccess access,
+diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
+index 7bd264b..9da106a 100644
+--- a/tests/unit/CMakeLists.txt
++++ b/tests/unit/CMakeLists.txt
+@@ -8,6 +8,7 @@ add_executable(unit_tests
+     core/fiber_test.cpp
+     core/filesystem_test.cpp
+     core/hash_test.cpp
++    core/memory_mapping_test.cpp
+     core/stream_test.cpp
+     core/chrono_test.cpp
+     ppc/import_function_test.cpp
+diff --git a/tests/unit/core/memory_mapping_test.cpp b/tests/unit/core/memory_mapping_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/core/memory_mapping_test.cpp
+@@ -0,0 +1,56 @@
++/**
++ * @file        memory_mapping_test.cpp
++ * @brief       Unit tests for host file-backed memory mappings
++ *
++ * @copyright   Copyright (c) 2026 Tom Clay
++ * @license     BSD 3-Clause License
++ */
++
++#include <cerrno>
++#include <cstdint>
++#include <string>
++
++#include <catch2/catch_test_macros.hpp>
++
++#include <rex/memory/utils.h>
++#include <rex/platform.h>
++
++#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++#endif
++
++#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
++TEST_CASE("POSIX file mapping is anonymous after creation", "[memory][mapping]") {
++  const std::string name = "rexglue_mapping_test_" + std::to_string(getpid());
++  const std::string shm_name = "/" + name;
++  const size_t mapping_size = rex::memory::page_size();
++
++  // A failed earlier run must not affect this test.
++  shm_unlink(shm_name.c_str());
++
++  const auto handle = rex::memory::CreateFileMappingHandle(
++      name, mapping_size, rex::memory::PageAccess::kReadWrite, false);
++  REQUIRE(handle != rex::memory::kFileMappingHandleInvalid);
++
++  errno = 0;
++  const int reopened = shm_open(shm_name.c_str(), O_RDWR, 0);
++  CHECK(reopened == -1);
++  CHECK(errno == ENOENT);
++  if (reopened >= 0) {
++    close(reopened);
++  }
++
++  auto* view = static_cast<uint8_t*>(rex::memory::MapFileView(
++      handle, nullptr, mapping_size, rex::memory::PageAccess::kReadWrite, 0));
++  REQUIRE(view != nullptr);
++  view[0] = 0x52;
++  view[mapping_size - 1] = 0x58;
++  CHECK(view[0] == 0x52);
++  CHECK(view[mapping_size - 1] == 0x58);
++
++  CHECK(rex::memory::UnmapFileView(handle, view, mapping_size));
++  rex::memory::CloseFileMappingHandle(handle, name);
++}
++#endif

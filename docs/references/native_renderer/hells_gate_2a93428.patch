@@ -1,0 +1,2949 @@
+From 2a934287a4c684df5ed38647712fc479465f3d90 Mon Sep 17 00:00:00 2001
+From: Zerkiller <84400002+florinp93@users.noreply.github.com>
+Date: Mon, 7 Sep 2026 18:42:49 +0300
+Subject: [PATCH] Add native Vulkan renderer with D3D12-GPU interop
+
+- Implement NativeDevice using DiligentCore Vulkan backend with
+  swapchain, blit pipeline, and texture upload
+- Implement NativePresenter with aspect-fit letterboxing, correct
+  viewport/scissor geometry, and resize/minimize handling
+- Add D3D12-to-Vulkan GPU interop: shared texture export via
+  ID3D12Device1::CreateSharedHandle, external memory import via
+  VK_KHR_external_memory_win32, adapter LUID verification, and
+  Flush+WaitForIdle synchronization for tear-free presentation
+- Fix color channel mapping (A2R10G10B10 format + BGR swizzle)
+- Preserve CPU readback as automatic fallback when interop is
+  unavailable or fails at runtime
+- Add native_renderer_test with 64 aspect/scaling regression cases
+- Integrate native renderer into app with use_native_presenter and
+  use_gpu_interop cvars
+---
+ .gitignore                                    |    9 +
+ CMakeLists.txt                                |  107 ++
+ dantes_inferno_manifest.toml                  |    6 +
+ src/dantes_inferno_app.h                      |   61 +-
+ .../dantes_inferno_native_app.h               |   64 +
+ .../dantes_inferno_native_main.cpp            |   12 +
+ src/native_renderer/native_device.cpp         | 1260 +++++++++++++++++
+ src/native_renderer/native_device.h           |  196 +++
+ src/native_renderer/native_presenter.cpp      |  378 +++++
+ src/native_renderer/native_presenter.h        |   37 +
+ .../native_renderer_integration.cpp           |   81 ++
+ .../native_renderer_integration.h             |   51 +
+ src/native_renderer/native_renderer_test.cpp  |  512 +++++++
+ 13 files changed, 2760 insertions(+), 14 deletions(-)
+ create mode 100644 src/native_renderer/dantes_inferno_native_app.h
+ create mode 100644 src/native_renderer/dantes_inferno_native_main.cpp
+ create mode 100644 src/native_renderer/native_device.cpp
+ create mode 100644 src/native_renderer/native_device.h
+ create mode 100644 src/native_renderer/native_presenter.cpp
+ create mode 100644 src/native_renderer/native_presenter.h
+ create mode 100644 src/native_renderer/native_renderer_integration.cpp
+ create mode 100644 src/native_renderer/native_renderer_integration.h
+ create mode 100644 src/native_renderer/native_renderer_test.cpp
+
+diff --git a/.gitignore b/.gitignore
+index f0f1d3f..0353364 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -28,6 +28,9 @@ generated/*/*.hpp
+ # --- ReXGlue SDK (cloned via setup script, not tracked here) ---
+ thirdparty/rexglue-sdk/
+ 
++# --- DiligentCore (cloned for native renderer, not tracked here) ---
++thirdparty/diligent-core/
++
+ # --- Disc images (copyrighted, do NOT commit) ---
+ disc/
+ *.iso
+@@ -108,3 +111,9 @@ launcher/installer.iss
+ 
+ # --- Test launcher dir ---
+ test-launcher/
++
++# --- Reverse engineering research workspace (persistent KB, never commit) ---
++tools/research/
++
++# --- Archived glyph research (moved out of working tree, never commit) ---
++.archive/
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index a1fafd8..0bb9546 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -61,6 +61,113 @@ target_include_directories(dantes_inferno PRIVATE
+     "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/rexglue-sdk/thirdparty/imgui"
+ )
+ 
++# =============================================================================
++# Native Renderer (DiligentCore/Vulkan) - IMPL-DC-001
++# =============================================================================
++# When enabled, builds the project-owned native renderer alongside the existing
++# ReXGlue path. The existing build is unaffected when OFF (default).
++option(DANTESINFERNO_NATIVE_RENDERER "Build native DiligentCore/Vulkan renderer" OFF)
++
++if(DANTESINFERNO_NATIVE_RENDERER)
++    set(DILIGENT_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/diligent-core"
++        CACHE PATH "Path to DiligentCore source tree")
++
++    if(NOT EXISTS "${DILIGENT_CORE_DIR}/CMakeLists.txt")
++        message(FATAL_ERROR
++            "DANTESINFERNO_NATIVE_RENDERER=ON but DiligentCore not found at:\n"
++            "  ${DILIGENT_CORE_DIR}\n"
++            "Clone it with:\n"
++            "  git clone --depth 1 --recurse-submodules "
++            "https://github.com/DiligentGraphics/DiligentCore.git "
++            "thirdparty/diligent-core")
++    endif()
++
++    # DiligentCore sets global properties (USE_FOLDERS, etc.) and has its own
++    # build settings. We add it as a subdirectory so its targets are available.
++    # The Diligent-BuildSettings interface only applies to DiligentCore's own
++    # targets, not ours, since we link privately.
++    set(DILIGENT_NO_HLSL ON CACHE BOOL "Disable HLSL support in DiligentCore" FORCE)
++    set(DILIGENT_INSTALL_CORE OFF CACHE BOOL "Don't install DiligentCore" FORCE)
++    set(DILIGENT_BUILD_TESTS OFF CACHE BOOL "Don't build DiligentCore tests" FORCE)
++
++    add_subdirectory("${DILIGENT_CORE_DIR}" "${CMAKE_BINARY_DIR}/diligent-core" EXCLUDE_FROM_ALL)
++
++    # Native renderer library (project-owned, no DiligentCore types in headers)
++    # Includes the integration module that bridges with ReXGlue's window system.
++    add_library(dante_native_renderer STATIC
++        src/native_renderer/native_device.cpp
++        src/native_renderer/native_renderer_integration.cpp
++        src/native_renderer/native_presenter.cpp
++    )
++    target_include_directories(dante_native_renderer PUBLIC
++        "${CMAKE_CURRENT_SOURCE_DIR}/src/native_renderer"
++        "${CMAKE_CURRENT_SOURCE_DIR}/src"
++    )
++    target_include_directories(dante_native_renderer PRIVATE
++        "${DILIGENT_CORE_DIR}"
++        "${DILIGENT_CORE_DIR}/Graphics"
++        "${DILIGENT_CORE_DIR}/Graphics/GraphicsEngine/interface"
++        "${DILIGENT_CORE_DIR}/Graphics/GraphicsEngineVulkan/interface"
++        "${DILIGENT_CORE_DIR}/Platforms/interface"
++        "${DILIGENT_CORE_DIR}/Platforms/Win32/interface"
++        "${DILIGENT_CORE_DIR}/Primitives/interface"
++        "${DILIGENT_CORE_DIR}/Common/interface"
++    )
++    target_link_libraries(dante_native_renderer PRIVATE
++        Diligent-GraphicsEngineVk-static
++        Diligent-GraphicsTools
++        Diligent-Common
++        rex::runtime
++        volk::volk
++        Vulkan::Headers
++    )
++
++    # Link the native renderer into the main dantes_inferno target so the
++    # D3D12 presenter can be replaced with the Vulkan presenter at runtime
++    # (gated by the use_native_presenter cvar). The preprocessor definition
++    # enables the conditional code in dantes_inferno_app.h.
++    target_link_libraries(dantes_inferno PRIVATE dante_native_renderer)
++    target_compile_definitions(dantes_inferno PRIVATE DANTESINFERNO_NATIVE_RENDERER)
++
++    # Standalone test: creates a Win32 window, initializes native device,
++    # and runs a clear+present loop. Does NOT need game assets.
++    if(WIN32)
++        add_executable(native_renderer_test
++            src/native_renderer/native_renderer_test.cpp
++        )
++        target_link_libraries(native_renderer_test PRIVATE
++            dante_native_renderer
++        )
++        # Need user32 for CreateWindow etc.
++        target_link_libraries(native_renderer_test PRIVATE user32 gdi32)
++    endif()
++
++    # Native renderer build of the game: uses DantesInfernoNativeApp
++    # (a derived class that adds native renderer hooks on top of the
++    # original DantesInfernoApp). The original dantes_inferno target
++    # and src/dantes_inferno_app.h are NOT modified.
++    set(DANTESINFERNO_NATIVE_SOURCES
++        src/native_renderer/dantes_inferno_native_main.cpp
++    )
++    if(WIN32)
++        list(APPEND DANTESINFERNO_NATIVE_SOURCES src/dantes_inferno.rc)
++        add_executable(dantes_inferno_native WIN32 ${DANTESINFERNO_NATIVE_SOURCES})
++    else()
++        add_executable(dantes_inferno_native ${DANTESINFERNO_NATIVE_SOURCES})
++    endif()
++    rexglue_setup_target(dantes_inferno_native GPU_PLUGINS xenos)
++    target_include_directories(dantes_inferno_native PRIVATE
++        "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/rexglue-sdk/thirdparty/imgui"
++    )
++    target_link_libraries(dantes_inferno_native PRIVATE dante_native_renderer)
++    target_compile_definitions(dantes_inferno_native PRIVATE DANTESINFERNO_NATIVE_RENDERER)
++
++    message(STATUS "Native renderer (DiligentCore/Vulkan) enabled")
++    message(STATUS "  Build native_renderer_test to verify clear+present")
++    message(STATUS "  Build dantes_inferno_native for game with native renderer")
++    message(STATUS "  dantes_inferno now links native presenter (use_native_presenter cvar)")
++endif()
++
+ option(DANTESINFERNO_BUILD_LAUNCHER "Build the native Qt launcher" ON)
+ option(DANTESINFERNO_LAUNCHER_BUILD_TESTS "Build Qt launcher tests" ON)
+ if(DANTESINFERNO_BUILD_LAUNCHER AND UNIX AND NOT APPLE)
+diff --git a/dantes_inferno_manifest.toml b/dantes_inferno_manifest.toml
+index 8c85156..cabd8fe 100644
+--- a/dantes_inferno_manifest.toml
++++ b/dantes_inferno_manifest.toml
+@@ -14,6 +14,12 @@ name = "UltrawideAspectHook"
+ registers = ["f29"]
+ after_instruction = true
+ 
++[[midasm_hook]]
++address = 0x8251DD38
++name = "UltrawideXScaleHook"
++registers = ["f12"]
++after_instruction = true
++
+ 
+ [entrypoint.functions.0x8221FE10]
+ name = "unresolved_target_8221FE10"
+diff --git a/src/dantes_inferno_app.h b/src/dantes_inferno_app.h
+index 90ec2a5..7f60dc3 100644
+--- a/src/dantes_inferno_app.h
++++ b/src/dantes_inferno_app.h
+@@ -16,6 +16,11 @@
+ #include <cstring>
+ #include <cstdlib>
+ 
++#ifdef DANTESINFERNO_NATIVE_RENDERER
++#include "native_renderer/native_presenter.h"
++#include <memory>
++#endif
++
+ REXCVAR_DEFINE_DOUBLE(time_scalar, 1.0, "Gameplay",
+                       "Guest time scaling factor (1.0 = normal, 50.0 = fast-forward)");
+ 
+@@ -179,15 +184,20 @@ class DantesInfernoApp : public rex::ReXApp {
+     double target_aspect = REXCVAR_GET(ultrawide_target_aspect);
+     if (target_aspect > 0.0) {
+       g_ultrawide_target_aspect = static_cast<float>(target_aspect);
+-      if (target_aspect >= 1.7778) {
+-        rex::cvar::SetFlagByName("present_letterbox", "false");
+-        REXLOG_INFO("ULTRAWIDE: target_aspect={:.4f}, present_letterbox disabled",
+-                    target_aspect);
+-      } else {
+-        rex::cvar::SetFlagByName("present_letterbox", "true");
+-        REXLOG_INFO("ULTRAWIDE: target_aspect={:.4f}, present_letterbox enabled",
+-                    target_aspect);
+-      }
++
++      uint32_t target_width = static_cast<uint32_t>(target_aspect * 720.0 + 0.5);
++      uint32_t video_mode_w = std::min(target_width, 4095u);
++      uint32_t window_w = std::min(target_width, 8192u);
++      rex::cvar::SetFlagByName("video_mode_width", std::to_string(video_mode_w));
++      rex::cvar::SetFlagByName("video_mode_height", "720");
++      rex::cvar::SetFlagByName("window_width", std::to_string(window_w));
++      rex::cvar::SetFlagByName("window_height", "720");
++
++      REXLOG_INFO(
++          "ULTRAWIDE: target_aspect={:.4f}, window={}x720, video_mode={}x720, "
++          "present_letterbox={}",
++          target_aspect, window_w, video_mode_w,
++          rex::cvar::Query<bool>("present_letterbox"));
+     } else {
+       REXLOG_INFO("ULTRAWIDE: disabled (target_aspect={:.4f})", target_aspect);
+     }
+@@ -214,11 +224,6 @@ class DantesInfernoApp : public rex::ReXApp {
+         [](std::string_view, std::string_view new_value) {
+           double aspect = std::stod(std::string(new_value));
+           g_ultrawide_target_aspect = static_cast<float>(aspect);
+-          if (aspect >= 1.7778) {
+-            rex::cvar::SetFlagByName("present_letterbox", "false");
+-          } else {
+-            rex::cvar::SetFlagByName("present_letterbox", "true");
+-          }
+         });
+ 
+     rex::ui::RegisterBind("bind_exit_game", "Alt+F4",
+@@ -256,9 +261,34 @@ class DantesInfernoApp : public rex::ReXApp {
+       rex::chrono::Clock::set_guest_time_scalar(target);
+       rex::cvar::SetFlagByName("vsync", fast ? "true" : "false");
+     });
++
++#ifdef DANTESINFERNO_NATIVE_RENDERER
++    if (rex::cvar::Query<bool>("use_native_presenter")) {
++      auto* gfx_sys = runtime() ? runtime()->graphics_system() : nullptr;
++      auto* graphics_system = static_cast<rex::graphics::GraphicsSystem*>(gfx_sys);
++      auto* rex_presenter = graphics_system ? graphics_system->presenter() : nullptr;
++      if (rex_presenter && window()) {
++        native_presenter_ = std::make_unique<dante::NativePresenter>();
++        uint32_t w = window()->GetDesiredLogicalWidth();
++        uint32_t h = window()->GetDesiredLogicalHeight();
++        if (w == 0) w = 1280;
++        if (h == 0) h = 720;
++        if (!native_presenter_->initialize(rex_presenter, window(), w, h)) {
++          REXLOG_WARN("Native presenter init failed; staying on D3D12 path");
++          native_presenter_.reset();
++        }
++      } else {
++        REXLOG_WARN("use_native_presenter=1 but presenter/window unavailable");
++      }
++    }
++#endif
+   }
+ 
+   void OnShutdown() override {
++#ifdef DANTESINFERNO_NATIVE_RENDERER
++    native_presenter_.reset();
++#endif
++
+     rex::ui::UnregisterBind("bind_fast_forward");
+     rex::ui::UnregisterBind("bind_fps_overlay");
+     rex::ui::UnregisterBind("bind_exit_game");
+@@ -271,4 +301,7 @@ class DantesInfernoApp : public rex::ReXApp {
+ 
+  private:
+   std::unique_ptr<FpsOverlayDialog> fps_overlay_;
++#ifdef DANTESINFERNO_NATIVE_RENDERER
++  std::unique_ptr<dante::NativePresenter> native_presenter_;
++#endif
+ };
+diff --git a/src/native_renderer/dantes_inferno_native_app.h b/src/native_renderer/dantes_inferno_native_app.h
+new file mode 100644
+index 0000000..edc269d
+--- /dev/null
++++ b/src/native_renderer/dantes_inferno_native_app.h
+@@ -0,0 +1,64 @@
++// dantes_inferno_native_app.h - Derived app with native renderer integration
++//
++// This is a COPY/DERIVATIVE of the original dantes_inferno_app.h.
++// It inherits from DantesInfernoApp and adds native DiligentCore/Vulkan
++// renderer support. The original src/dantes_inferno_app.h is NOT modified.
++//
++// Part of the DiligentCore migration (IMPL-DC-003).
++// See: tools/research/dante_re/TRANSITION/DILIGENTCORE_MIGRATION_PLAN.md
++
++#pragma once
++
++#include "dantes_inferno_app.h"
++#include "native_renderer/native_renderer_integration.h"
++
++// Derived app class that adds native renderer support on top of the
++// original DantesInfernoApp. All original behavior is inherited;
++// native renderer hooks are added via overrides.
++class DantesInfernoNativeApp : public DantesInfernoApp {
++ public:
++  using DantesInfernoApp::DantesInfernoApp;
++
++  static std::unique_ptr<rex::ui::WindowedApp> Create(
++      rex::ui::WindowedAppContext& ctx) {
++    return std::unique_ptr<DantesInfernoNativeApp>(
++        new DantesInfernoNativeApp(ctx, "dantes_inferno", PPCImageConfig));
++  }
++
++  void OnPostSetup() override {
++    // Call base class first (sets up time scalar, FPS overlay, keybinds)
++    DantesInfernoApp::OnPostSetup();
++
++    // Initialize native renderer using the app's SDL window
++    if (window()) {
++      void* hwnd = window()->GetNativeWindowHandle();
++      if (hwnd) {
++        native_renderer_ = std::make_unique<dante::NativeRendererIntegration>();
++        uint32_t w = window()->GetDesiredLogicalWidth();
++        uint32_t h = window()->GetDesiredLogicalHeight();
++        if (w == 0) w = 1280;
++        if (h == 0) h = 720;
++        if (!native_renderer_->initialize(hwnd, w, h)) {
++          REXLOG_WARN("Native renderer init failed; staying on Xenos path");
++          native_renderer_.reset();
++        }
++      }
++    }
++  }
++
++  void OnWindowPixelSizeChanged(uint32_t pixel_width,
++                                 uint32_t pixel_height) override {
++    DantesInfernoApp::OnWindowPixelSizeChanged(pixel_width, pixel_height);
++    if (native_renderer_) {
++      native_renderer_->onResize(pixel_width, pixel_height);
++    }
++  }
++
++  void OnShutdown() override {
++    native_renderer_.reset();
++    DantesInfernoApp::OnShutdown();
++  }
++
++ private:
++  std::unique_ptr<dante::NativeRendererIntegration> native_renderer_;
++};
+diff --git a/src/native_renderer/dantes_inferno_native_main.cpp b/src/native_renderer/dantes_inferno_native_main.cpp
+new file mode 100644
+index 0000000..bf11cea
+--- /dev/null
++++ b/src/native_renderer/dantes_inferno_native_main.cpp
+@@ -0,0 +1,12 @@
++// dantes_inferno_native - Entry point for native renderer build
++//
++// This is a COPY of src/main.cpp that uses DantesInfernoNativeApp
++// instead of DantesInfernoApp. The original src/main.cpp is NOT modified.
++//
++// Part of the DiligentCore migration (IMPL-DC-003).
++
++#include "generated/default/dantes_inferno_init.h"
++
++#include "dantes_inferno_native_app.h"
++
++REX_DEFINE_APP(dantes_inferno_native, DantesInfernoNativeApp::Create)
+diff --git a/src/native_renderer/native_device.cpp b/src/native_renderer/native_device.cpp
+new file mode 100644
+index 0000000..bb5ffbc
+--- /dev/null
++++ b/src/native_renderer/native_device.cpp
+@@ -0,0 +1,1260 @@
++#include "native_device.h"
++
++#if defined(_WIN32)
++#include <windows.h>
++#define VK_USE_PLATFORM_WIN32_KHR
++#define VK_NO_PROTOTYPES
++#include "volk.h"
++#endif
++
++#include "Graphics/GraphicsEngineVulkan/interface/EngineFactoryVk.h"
++#include "Graphics/GraphicsEngineVulkan/interface/RenderDeviceVk.h"
++#include "Graphics/GraphicsEngine/interface/RenderDevice.h"
++#include "Graphics/GraphicsEngine/interface/DeviceContext.h"
++#include "Graphics/GraphicsEngine/interface/SwapChain.h"
++#include "Graphics/GraphicsEngine/interface/Buffer.h"
++#include "Graphics/GraphicsEngine/interface/PipelineState.h"
++#include "Graphics/GraphicsEngine/interface/Shader.h"
++#include "Graphics/GraphicsEngine/interface/InputLayout.h"
++#include "Graphics/GraphicsEngine/interface/ShaderResourceBinding.h"
++#include "Graphics/GraphicsEngine/interface/ResourceMapping.h"
++#include "Graphics/GraphicsEngine/interface/ShaderResourceVariable.h"
++#include "Graphics/GraphicsEngine/interface/Texture.h"
++#include "Graphics/GraphicsEngine/interface/TextureView.h"
++#include "Graphics/GraphicsEngine/interface/Sampler.h"
++#include "Graphics/GraphicsTools/interface/GraphicsUtilities.h"
++#include "Graphics/GraphicsAccessories/interface/GraphicsAccessories.hpp"
++
++#include <rex/logging/macros.h>
++
++#include <algorithm>
++#include <cmath>
++#include <chrono>
++#include <cstdio>
++#include <cstring>
++#include <vector>
++
++namespace dante {
++
++struct NativeBuffer {
++  Diligent::IBuffer* buffer = nullptr;
++};
++
++struct NativePipeline {
++  Diligent::IPipelineState* pipeline = nullptr;
++};
++
++struct NativeTexture {
++  Diligent::ITexture* texture = nullptr;
++  Diligent::ISampler* sampler = nullptr;
++};
++
++struct NativeDevice::Impl {
++  Diligent::IEngineFactoryVk* factory = nullptr;
++  Diligent::IRenderDevice* device = nullptr;
++  Diligent::IDeviceContext* context = nullptr;
++  Diligent::ISwapChain* swapchain = nullptr;
++  Diligent::IPipelineState* current_pipeline = nullptr;
++  bool initialized = false;
++
++  Diligent::IPipelineState* blit_pipeline = nullptr;
++  Diligent::ISampler* blit_sampler = nullptr;
++  Diligent::IShaderResourceBinding* blit_srb = nullptr;
++  Diligent::ITexture* blit_texture = nullptr;
++  uint32_t blit_texture_w = 0;
++  uint32_t blit_texture_h = 0;
++
++  void* hwnd = nullptr;
++  double display_aspect = 0.0;
++  bool letterbox = true;
++  uint32_t logged_width = 0;
++  uint32_t logged_height = 0;
++  double logged_aspect = -1.0;
++  bool logged_letterbox = false;
++
++  void setBlitViewport() {
++    const auto& desc = swapchain->GetDesc();
++    uint32_t width = desc.Width;
++    uint32_t height = desc.Height;
++    if (letterbox && std::isfinite(display_aspect) && display_aspect > 0.0) {
++      if (display_aspect > double(width) / height) {
++        height = uint32_t(std::clamp(std::round(width / display_aspect),
++                                     1.0, double(height)));
++      } else {
++        width = uint32_t(std::clamp(std::round(height * display_aspect),
++                                    1.0, double(width)));
++      }
++    }
++    const uint32_t x = (desc.Width - width) / 2;
++    const uint32_t y = (desc.Height - height) / 2;
++    Diligent::Viewport viewport;
++    viewport.TopLeftX = float(x);
++    viewport.TopLeftY = float(y);
++    viewport.Width = float(width);
++    viewport.Height = float(height);
++    Diligent::Rect scissor{int32_t(x), int32_t(y),
++                           int32_t(x + width), int32_t(y + height)};
++    context->SetViewports(1, &viewport, desc.Width, desc.Height);
++    context->SetScissorRects(1, &scissor, desc.Width, desc.Height);
++    if (logged_width != desc.Width || logged_height != desc.Height ||
++        logged_aspect != display_aspect || logged_letterbox != letterbox) {
++      REXLOG_INFO("NativeDevice: presentation window={}x{} target_aspect={:.6f} "
++                  "letterbox={} viewport=({},{}) {}x{}",
++                  desc.Width, desc.Height, display_aspect, letterbox,
++                  x, y, width, height);
++      logged_width = desc.Width;
++      logged_height = desc.Height;
++      logged_aspect = display_aspect;
++      logged_letterbox = letterbox;
++    }
++  }
++
++  void* imported_handle = nullptr;
++  VkImage imported_vk_image = VK_NULL_HANDLE;
++  VkDeviceMemory imported_vk_memory = VK_NULL_HANDLE;
++  Diligent::ITexture* imported_texture = nullptr;
++  Diligent::ITextureView* imported_srv = nullptr;
++  Diligent::IShaderResourceBinding* imported_srb = nullptr;
++  uint32_t imported_w = 0;
++  uint32_t imported_h = 0;
++  bool ext_memory_supported = false;
++};
++
++NativeDevice::NativeDevice() : impl_(new Impl()) {}
++
++NativeDevice::~NativeDevice() {
++  shutdown();
++  delete impl_;
++}
++
++bool NativeDevice::initialize(void* hwnd, uint32_t width, uint32_t height) {
++  shutdown();
++
++  impl_->factory = Diligent::GetEngineFactoryVk();
++  if (!impl_->factory) {
++    REXLOG_ERROR("NativeDevice: Failed to get Vulkan engine factory");
++    return false;
++  }
++
++  Diligent::EngineVkCreateInfo engine_ci;
++  engine_ci.GraphicsAPIVersion = Diligent::Version{1, 3};
++#ifdef NDEBUG
++  engine_ci.EnableValidation = false;
++#else
++  engine_ci.EnableValidation = true;
++#endif
++#if defined(_WIN32)
++  const char* device_exts[] = {
++      VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
++  };
++  engine_ci.DeviceExtensionCount = 1;
++  engine_ci.ppDeviceExtensionNames = device_exts;
++#endif
++
++  impl_->hwnd = hwnd;
++#if defined(_WIN32)
++  RECT client;
++  if (GetClientRect(static_cast<HWND>(hwnd), &client) &&
++      client.right > 0 && client.bottom > 0) {
++    width = uint32_t(client.right);
++    height = uint32_t(client.bottom);
++  }
++#endif
++
++  impl_->factory->CreateDeviceAndContextsVk(engine_ci, &impl_->device,
++                                             &impl_->context);
++  if (!impl_->device || !impl_->context) {
++    REXLOG_ERROR("NativeDevice: Failed to create Vulkan device/context");
++    shutdown();
++    return false;
++  }
++
++  Diligent::SwapChainDesc sc_desc;
++  sc_desc.Width = width;
++  sc_desc.Height = height;
++  sc_desc.ColorBufferFormat = Diligent::TEX_FORMAT_RGBA8_UNORM;
++  sc_desc.DepthBufferFormat = Diligent::TEX_FORMAT_D32_FLOAT;
++  sc_desc.BufferCount = 3;
++  sc_desc.DefaultDepthValue = 1.0f;
++  sc_desc.IsPrimary = true;
++
++  Diligent::NativeWindow native_window(hwnd);
++
++  impl_->factory->CreateSwapChainVk(impl_->device, impl_->context, sc_desc,
++                                    native_window, &impl_->swapchain);
++  if (!impl_->swapchain) {
++    REXLOG_ERROR("NativeDevice: Failed to create Vulkan swapchain");
++    shutdown();
++    return false;
++  }
++
++  if (!initializeBlitPipeline()) {
++    shutdown();
++    return false;
++  }
++
++  impl_->initialized = true;
++  REXLOG_INFO("NativeDevice: Vulkan device initialized ({}x{}, encoded RGB passthrough, format={})",
++              width, height, Diligent::GetTextureFormatAttribs(
++                  impl_->swapchain->GetDesc().ColorBufferFormat).Name);
++  return true;
++}
++
++void NativeDevice::beginFrame() {
++  if (!impl_->initialized) return;
++
++  auto* rtv = impl_->swapchain->GetCurrentBackBufferRTV();
++  auto* dsv = impl_->swapchain->GetDepthBufferDSV();
++  impl_->context->SetRenderTargets(1, &rtv, dsv,
++                                   Diligent::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
++}
++
++void NativeDevice::clear(float r, float g, float b, float a) {
++  if (!impl_->initialized) return;
++
++  const float clear_color[] = {r, g, b, a};
++  auto* rtv = impl_->swapchain->GetCurrentBackBufferRTV();
++  impl_->context->ClearRenderTarget(rtv, clear_color,
++                                    Diligent::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
++
++  auto* dsv = impl_->swapchain->GetDepthBufferDSV();
++  if (dsv) {
++    impl_->context->ClearDepthStencil(dsv, Diligent::CLEAR_DEPTH_FLAG, 1.0f, 0,
++                                      Diligent::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
++  }
++}
++
++void NativeDevice::present(uint32_t sync_interval) {
++  if (!impl_->initialized) return;
++  impl_->swapchain->Present(sync_interval);
++}
++
++static const char* kBlitVS = R"(
++struct VSOutput {
++    float4 pos : SV_POSITION;
++    float2 uv  : TEXCOORD0;
++};
++void main(in uint vid : SV_VertexID, out VSOutput Out) {
++    float2 base = float2((vid == 1) ? 3.0 : -1.0,
++                         (vid == 2) ? 3.0 : -1.0);
++    Out.pos = float4(base, 0.0, 1.0);
++    Out.uv = float2((vid == 1) ? 2.0 : 0.0,
++                    (vid == 2) ? 2.0 : 0.0);
++}
++)";
++
++static const char* kBlitPS = R"(
++Texture2D<float4> g_Texture : register(t0);
++SamplerState g_Sampler : register(s0);
++struct PSInput {
++    float4 pos : SV_POSITION;
++    float2 uv  : TEXCOORD0;
++};
++struct PSOutput {
++    float4 color : SV_TARGET0;
++};
++void main(in PSInput In, out PSOutput Out) {
++    float2 uv = float2(In.uv.x, 1.0 - In.uv.y);
++    Out.color = g_Texture.Sample(g_Sampler, uv);
++}
++)";
++
++bool NativeDevice::initializeBlitPipeline() {
++  if (!impl_->blit_pipeline) {
++    Diligent::ShaderCreateInfo vs_ci;
++    vs_ci.SourceLanguage = Diligent::SHADER_SOURCE_LANGUAGE_HLSL;
++    vs_ci.Source = kBlitVS;
++    vs_ci.EntryPoint = "main";
++    vs_ci.Desc.ShaderType = Diligent::SHADER_TYPE_VERTEX;
++    vs_ci.Desc.Name = "BlitVS";
++    Diligent::IShader* vs = nullptr;
++    impl_->device->CreateShader(vs_ci, &vs);
++    if (!vs) {
++      REXLOG_ERROR("NativeDevice: Failed to compile blit VS");
++      return false;
++    }
++
++    Diligent::ShaderCreateInfo ps_ci;
++    ps_ci.SourceLanguage = Diligent::SHADER_SOURCE_LANGUAGE_HLSL;
++    ps_ci.Source = kBlitPS;
++    ps_ci.EntryPoint = "main";
++    ps_ci.Desc.ShaderType = Diligent::SHADER_TYPE_PIXEL;
++    ps_ci.Desc.Name = "BlitPS";
++    Diligent::IShader* ps = nullptr;
++    impl_->device->CreateShader(ps_ci, &ps);
++    if (!ps) {
++      REXLOG_ERROR("NativeDevice: Failed to compile blit PS");
++      vs->Release();
++      return false;
++    }
++
++    Diligent::SamplerDesc sdesc;
++    sdesc.MinFilter = Diligent::FILTER_TYPE_LINEAR;
++    sdesc.MagFilter = Diligent::FILTER_TYPE_LINEAR;
++    sdesc.MipFilter = Diligent::FILTER_TYPE_LINEAR;
++    sdesc.AddressU = Diligent::TEXTURE_ADDRESS_CLAMP;
++    sdesc.AddressV = Diligent::TEXTURE_ADDRESS_CLAMP;
++    sdesc.Name = "BlitSampler";
++    impl_->device->CreateSampler(sdesc, &impl_->blit_sampler);
++
++    const auto& sc_desc = impl_->swapchain->GetDesc();
++
++    Diligent::GraphicsPipelineStateCreateInfo pso_ci;
++    pso_ci.PSODesc.Name = "BlitPipeline";
++    pso_ci.PSODesc.PipelineType = Diligent::PIPELINE_TYPE_GRAPHICS;
++    pso_ci.pVS = vs;
++    pso_ci.pPS = ps;
++    pso_ci.GraphicsPipeline.NumRenderTargets = 1;
++    pso_ci.GraphicsPipeline.RTVFormats[0] = sc_desc.ColorBufferFormat;
++    pso_ci.GraphicsPipeline.DSVFormat = sc_desc.DepthBufferFormat;
++    pso_ci.GraphicsPipeline.PrimitiveTopology =
++        Diligent::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++    pso_ci.GraphicsPipeline.InputLayout.NumElements = 0;
++    pso_ci.GraphicsPipeline.RasterizerDesc.CullMode = Diligent::CULL_MODE_NONE;
++    pso_ci.GraphicsPipeline.RasterizerDesc.ScissorEnable = Diligent::True;
++    pso_ci.GraphicsPipeline.DepthStencilDesc.DepthEnable = Diligent::False;
++    auto& rt0 = pso_ci.GraphicsPipeline.BlendDesc.RenderTargets[0];
++    rt0.BlendEnable = Diligent::False;
++    rt0.RenderTargetWriteMask = Diligent::COLOR_MASK_ALL;
++    pso_ci.PSODesc.ResourceLayout.DefaultVariableType =
++        Diligent::SHADER_RESOURCE_VARIABLE_TYPE_STATIC;
++    Diligent::ShaderResourceVariableDesc vars[] = {
++        {Diligent::SHADER_TYPE_PIXEL, "g_Texture",
++         Diligent::SHADER_RESOURCE_VARIABLE_TYPE_MUTABLE},
++    };
++    pso_ci.PSODesc.ResourceLayout.NumVariables = 1;
++    pso_ci.PSODesc.ResourceLayout.Variables = vars;
++
++    impl_->device->CreateGraphicsPipelineState(pso_ci, &impl_->blit_pipeline);
++    vs->Release();
++    ps->Release();
++
++    if (!impl_->blit_pipeline) {
++      REXLOG_ERROR("NativeDevice: Failed to create blit pipeline");
++      return false;
++    }
++
++    auto* samp_var = impl_->blit_pipeline->GetStaticVariableByName(
++        Diligent::SHADER_TYPE_PIXEL, "g_Sampler");
++    if (samp_var && impl_->blit_sampler)
++      samp_var->Set(impl_->blit_sampler);
++    else {
++      REXLOG_ERROR("NativeDevice: blit sampler static var not found or null sampler");
++      return false;
++    }
++
++    REXLOG_INFO("NativeDevice: blit pipeline created (HLSL/glslang, cull=none)");
++
++  }
++  return true;
++}
++
++bool NativeDevice::presentImage(uint32_t width, uint32_t height,
++                                const void* rgba_data, size_t row_stride,
++                                uint32_t sync_interval, NativePresentTimings* timings) {
++  if (!impl_->initialized || width == 0 || height == 0 || !rgba_data ||
++      row_stride < size_t(width) * 4)
++    return false;
++
++  using Clock = std::chrono::steady_clock;
++  const auto upload_start = timings ? Clock::now() : Clock::time_point{};
++  if (timings) *timings = {};
++
++  if (!impl_->blit_texture || !impl_->blit_srb ||
++      impl_->blit_texture_w != width || impl_->blit_texture_h != height) {
++    if (impl_->blit_srb) {
++      impl_->blit_srb->Release();
++      impl_->blit_srb = nullptr;
++    }
++    if (impl_->blit_texture) {
++      impl_->blit_texture->Release();
++      impl_->blit_texture = nullptr;
++    }
++    Diligent::TextureDesc tex_desc;
++    tex_desc.Type = Diligent::RESOURCE_DIM_TEX_2D;
++    tex_desc.Width = width;
++    tex_desc.Height = height;
++    tex_desc.MipLevels = 1;
++    tex_desc.Format = Diligent::TEX_FORMAT_RGBA8_UNORM;
++    tex_desc.BindFlags = Diligent::BIND_SHADER_RESOURCE;
++    tex_desc.Usage = Diligent::USAGE_DEFAULT;
++    tex_desc.Name = "BlitStagingTexture";
++    impl_->device->CreateTexture(tex_desc, nullptr, &impl_->blit_texture);
++    if (!impl_->blit_texture) {
++      REXLOG_ERROR("NativeDevice: Failed to create blit texture");
++      return false;
++    }
++    impl_->blit_pipeline->CreateShaderResourceBinding(&impl_->blit_srb, true);
++    if (!impl_->blit_srb) {
++      REXLOG_ERROR("NativeDevice: Failed to create blit SRB");
++      return false;
++    }
++    auto* tex_var = impl_->blit_srb->GetVariableByName(
++        Diligent::SHADER_TYPE_PIXEL, "g_Texture");
++    auto* srv =
++        impl_->blit_texture->GetDefaultView(Diligent::TEXTURE_VIEW_SHADER_RESOURCE);
++    if (!tex_var || !srv) {
++      REXLOG_ERROR("NativeDevice: blit texture variable or SRV unavailable");
++      impl_->blit_srb->Release();
++      impl_->blit_srb = nullptr;
++      return false;
++    }
++    tex_var->Set(srv);
++    impl_->blit_texture_w = width;
++    impl_->blit_texture_h = height;
++    REXLOG_INFO("NativeDevice: blit texture created ({}x{})", width, height);
++  }
++
++  Diligent::Box box;
++  box.MinX = 0;
++  box.MaxX = width;
++  box.MinY = 0;
++  box.MaxY = height;
++  box.MinZ = 0;
++  box.MaxZ = 1;
++  Diligent::TextureSubResData sub_res;
++  sub_res.pData = rgba_data;
++  sub_res.Stride = row_stride;
++  impl_->context->UpdateTexture(
++      impl_->blit_texture, 0, 0, box, sub_res,
++      Diligent::RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
++      Diligent::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
++
++  auto* rtv = impl_->swapchain->GetCurrentBackBufferRTV();
++  auto* dsv = impl_->swapchain->GetDepthBufferDSV();
++  impl_->context->SetRenderTargets(1, &rtv, dsv,
++                                   Diligent::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
++
++  const float clear_color[] = {0.0f, 0.0f, 0.0f, 1.0f};
++  impl_->context->ClearRenderTarget(rtv, clear_color,
++                                    Diligent::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
++
++  impl_->setBlitViewport();
++
++  impl_->context->SetPipelineState(impl_->blit_pipeline);
++  impl_->context->CommitShaderResources(
++      impl_->blit_srb, Diligent::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
++  Diligent::DrawAttribs da;
++  da.NumVertices = 3;
++  da.Flags = Diligent::DRAW_FLAG_VERIFY_ALL;
++  impl_->context->Draw(da);
++
++  const auto present_start = timings ? Clock::now() : Clock::time_point{};
++  impl_->swapchain->Present(sync_interval);
++  if (timings) {
++    timings->upload_draw_cpu_ms =
++        std::chrono::duration<double, std::milli>(present_start - upload_start).count();
++    timings->present_cpu_ms =
++        std::chrono::duration<double, std::milli>(Clock::now() - present_start).count();
++  }
++  return true;
++}
++
++void NativeDevice::setDisplayAspect(double aspect, bool letterbox) {
++  if (!impl_->initialized) return;
++  impl_->display_aspect = aspect;
++  impl_->letterbox = letterbox;
++}
++
++bool NativeDevice::updateWindowSize() {
++  if (!impl_->initialized) return false;
++#if defined(_WIN32)
++  const auto hwnd = static_cast<HWND>(impl_->hwnd);
++  RECT client;
++  if (IsIconic(hwnd) || !GetClientRect(hwnd, &client) ||
++      client.right <= 0 || client.bottom <= 0) return false;
++  const auto& desc = impl_->swapchain->GetDesc();
++  if (desc.Width != uint32_t(client.right) || desc.Height != uint32_t(client.bottom)) {
++    resize(uint32_t(client.right), uint32_t(client.bottom));
++    REXLOG_INFO("NativeDevice: client resized to {}x{}", client.right, client.bottom);
++  }
++#endif
++  return true;
++}
++
++NativeSwapchainDesc NativeDevice::swapchainDesc() const {
++  NativeSwapchainDesc desc;
++  if (impl_->initialized && impl_->swapchain) {
++    const auto& sc_desc = impl_->swapchain->GetDesc();
++    desc.Width = sc_desc.Width;
++    desc.Height = sc_desc.Height;
++  }
++  return desc;
++}
++
++bool NativeDevice::presentImageShared(void* shared_handle, uint32_t width,
++                                       uint32_t height, uint32_t sync_interval,
++                                       NativePresentTimings* timings,
++                                       uint32_t adapter_luid_low,
++                                       int32_t adapter_luid_high) {
++  if (!impl_->initialized || !shared_handle || width == 0 || height == 0)
++    return false;
++
++#if !defined(_WIN32)
++  return false;
++#else
++  using Clock = std::chrono::steady_clock;
++  const auto upload_start = timings ? Clock::now() : Clock::time_point{};
++  if (timings) *timings = {};
++
++  if (!impl_->ext_memory_supported) {
++    auto* render_device_vk = static_cast<Diligent::IRenderDeviceVk*>(impl_->device);
++    VkPhysicalDevice phys_dev = render_device_vk->GetVkPhysicalDevice();
++    VkDevice vk_dev = render_device_vk->GetVkDevice();
++
++    VkPhysicalDeviceIDProperties id_props{};
++    id_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
++    VkPhysicalDeviceProperties2 props2{};
++    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
++    props2.pNext = &id_props;
++    vkGetPhysicalDeviceProperties2(phys_dev, &props2);
++
++    if (adapter_luid_low != 0 || adapter_luid_high != 0) {
++      if (id_props.deviceLUIDValid) {
++        const uint32_t vk_luid_low =
++            reinterpret_cast<const uint32_t*>(id_props.deviceLUID)[0];
++        const int32_t vk_luid_high =
++            reinterpret_cast<const int32_t*>(id_props.deviceLUID)[1];
++        if (vk_luid_low != adapter_luid_low || vk_luid_high != adapter_luid_high) {
++          REXLOG_ERROR("NativeDevice: adapter LUID mismatch (d3d12=({}, {}) "
++                       "vulkan=({}, {})) - cross-API sharing requires same GPU",
++                       adapter_luid_low, adapter_luid_high,
++                       vk_luid_low, vk_luid_high);
++          return false;
++        }
++        REXLOG_INFO("NativeDevice: adapter LUID match verified ({}, {})",
++                    vk_luid_low, vk_luid_high);
++      } else {
++        REXLOG_WARN("NativeDevice: Vulkan deviceLUID not valid, cannot verify "
++                    "adapter match");
++      }
++    }
++
++    VkPhysicalDeviceExternalImageFormatInfo external_fmt_info{};
++    external_fmt_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO;
++    external_fmt_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
++
++    VkPhysicalDeviceImageFormatInfo2 fmt_info{};
++    fmt_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
++    fmt_info.format = VK_FORMAT_A2R10G10B10_UNORM_PACK32;
++    fmt_info.type = VK_IMAGE_TYPE_2D;
++    fmt_info.tiling = VK_IMAGE_TILING_OPTIMAL;
++    fmt_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
++    fmt_info.pNext = &external_fmt_info;
++
++    VkExternalImageFormatProperties external_fmt_props{};
++    external_fmt_props.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES;
++    VkImageFormatProperties2 fmt_props2{};
++    fmt_props2.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
++    fmt_props2.pNext = &external_fmt_props;
++
++    VkResult res = vkGetPhysicalDeviceImageFormatProperties2(
++        phys_dev, &fmt_info, &fmt_props2);
++    if (res != VK_SUCCESS) {
++      REXLOG_WARN("NativeDevice: VK_KHR_external_memory_win32 not supported for "
++                  "R10G10B10A2 (res={})", int(res));
++      return false;
++    }
++    impl_->ext_memory_supported = true;
++    REXLOG_INFO("NativeDevice: external memory import supported");
++  }
++
++  if (impl_->imported_handle != shared_handle ||
++      impl_->imported_w != width || impl_->imported_h != height) {
++    if (impl_->imported_srb) {
++      impl_->imported_srb->Release();
++      impl_->imported_srb = nullptr;
++    }
++    if (impl_->imported_srv) {
++      impl_->imported_srv->Release();
++      impl_->imported_srv = nullptr;
++    }
++    if (impl_->imported_texture) {
++      impl_->imported_texture->Release();
++      impl_->imported_texture = nullptr;
++    }
++    if (impl_->imported_vk_image != VK_NULL_HANDLE) {
++      vkDestroyImage(static_cast<Diligent::IRenderDeviceVk*>(impl_->device)->GetVkDevice(),
++                     impl_->imported_vk_image, nullptr);
++      impl_->imported_vk_image = VK_NULL_HANDLE;
++    }
++    if (impl_->imported_vk_memory != VK_NULL_HANDLE) {
++      vkFreeMemory(static_cast<Diligent::IRenderDeviceVk*>(impl_->device)->GetVkDevice(),
++                   impl_->imported_vk_memory, nullptr);
++      impl_->imported_vk_memory = VK_NULL_HANDLE;
++    }
++
++    auto* render_device_vk = static_cast<Diligent::IRenderDeviceVk*>(impl_->device);
++    VkDevice vk_dev = render_device_vk->GetVkDevice();
++
++    VkExternalMemoryImageCreateInfo external_ci{};
++    external_ci.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
++    external_ci.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
++
++    VkImageCreateInfo image_ci{};
++    image_ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++    image_ci.pNext = &external_ci;
++    image_ci.imageType = VK_IMAGE_TYPE_2D;
++    image_ci.format = VK_FORMAT_A2R10G10B10_UNORM_PACK32;
++    image_ci.extent.width = width;
++    image_ci.extent.height = height;
++    image_ci.extent.depth = 1;
++    image_ci.mipLevels = 1;
++    image_ci.arrayLayers = 1;
++    image_ci.samples = VK_SAMPLE_COUNT_1_BIT;
++    image_ci.tiling = VK_IMAGE_TILING_OPTIMAL;
++    image_ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
++    image_ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++    image_ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++
++    VkResult res = vkCreateImage(vk_dev, &image_ci, nullptr, &impl_->imported_vk_image);
++    if (res != VK_SUCCESS) {
++      REXLOG_ERROR("NativeDevice: vkCreateImage failed (res={})", int(res));
++      impl_->imported_vk_image = VK_NULL_HANDLE;
++      return false;
++    }
++
++    VkMemoryRequirements mem_reqs;
++    vkGetImageMemoryRequirements(vk_dev, impl_->imported_vk_image, &mem_reqs);
++
++    VkMemoryDedicatedAllocateInfo dedicated_ai{};
++    dedicated_ai.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
++    dedicated_ai.image = impl_->imported_vk_image;
++    dedicated_ai.buffer = VK_NULL_HANDLE;
++
++    VkImportMemoryWin32HandleInfoKHR import_info{};
++    import_info.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
++    import_info.pNext = &dedicated_ai;
++    import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
++    import_info.handle = shared_handle;
++    import_info.name = nullptr;
++
++    VkMemoryAllocateInfo alloc_info{};
++    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
++    alloc_info.pNext = &import_info;
++    alloc_info.allocationSize = mem_reqs.size;
++
++    VkPhysicalDeviceMemoryProperties mem_props;
++    vkGetPhysicalDeviceMemoryProperties(
++        render_device_vk->GetVkPhysicalDevice(), &mem_props);
++    alloc_info.memoryTypeIndex = UINT32_MAX;
++    for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
++      if ((mem_reqs.memoryTypeBits & (1 << i)) &&
++          (mem_props.memoryTypes[i].propertyFlags &
++           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
++        alloc_info.memoryTypeIndex = i;
++        break;
++      }
++    }
++    if (alloc_info.memoryTypeIndex == UINT32_MAX) {
++      for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
++        if (mem_reqs.memoryTypeBits & (1 << i)) {
++          alloc_info.memoryTypeIndex = i;
++          break;
++        }
++      }
++    }
++    if (alloc_info.memoryTypeIndex == UINT32_MAX) {
++      REXLOG_ERROR("NativeDevice: No suitable memory type for imported image");
++      vkDestroyImage(vk_dev, impl_->imported_vk_image, nullptr);
++      impl_->imported_vk_image = VK_NULL_HANDLE;
++      return false;
++    }
++
++    res = vkAllocateMemory(vk_dev, &alloc_info, nullptr, &impl_->imported_vk_memory);
++    if (res != VK_SUCCESS) {
++      REXLOG_ERROR("NativeDevice: vkAllocateMemory failed (res={})", int(res));
++      vkDestroyImage(vk_dev, impl_->imported_vk_image, nullptr);
++      impl_->imported_vk_image = VK_NULL_HANDLE;
++      return false;
++    }
++
++    res = vkBindImageMemory(vk_dev, impl_->imported_vk_image,
++                            impl_->imported_vk_memory, 0);
++    if (res != VK_SUCCESS) {
++      REXLOG_ERROR("NativeDevice: vkBindImageMemory failed (res={})", int(res));
++      vkFreeMemory(vk_dev, impl_->imported_vk_memory, nullptr);
++      impl_->imported_vk_memory = VK_NULL_HANDLE;
++      vkDestroyImage(vk_dev, impl_->imported_vk_image, nullptr);
++      impl_->imported_vk_image = VK_NULL_HANDLE;
++      return false;
++    }
++
++    Diligent::TextureDesc tex_desc;
++    tex_desc.Type = Diligent::RESOURCE_DIM_TEX_2D;
++    tex_desc.Width = width;
++    tex_desc.Height = height;
++    tex_desc.MipLevels = 1;
++    tex_desc.Format = Diligent::TEX_FORMAT_RGB10A2_UNORM;
++    tex_desc.BindFlags = Diligent::BIND_SHADER_RESOURCE;
++    tex_desc.Usage = Diligent::USAGE_DEFAULT;
++    tex_desc.Name = "ImportedGuestOutput";
++
++    render_device_vk->CreateTextureFromVulkanImage(
++        impl_->imported_vk_image, tex_desc,
++        Diligent::RESOURCE_STATE_SHADER_RESOURCE, &impl_->imported_texture);
++    if (!impl_->imported_texture) {
++      REXLOG_ERROR("NativeDevice: CreateTextureFromVulkanImage failed");
++      vkFreeMemory(vk_dev, impl_->imported_vk_memory, nullptr);
++      impl_->imported_vk_memory = VK_NULL_HANDLE;
++      vkDestroyImage(vk_dev, impl_->imported_vk_image, nullptr);
++      impl_->imported_vk_image = VK_NULL_HANDLE;
++      return false;
++    }
++
++    impl_->blit_pipeline->CreateShaderResourceBinding(&impl_->imported_srb, true);
++    if (!impl_->imported_srb) {
++      REXLOG_ERROR("NativeDevice: Failed to create imported SRB");
++      return false;
++    }
++    auto* tex_var = impl_->imported_srb->GetVariableByName(
++        Diligent::SHADER_TYPE_PIXEL, "g_Texture");
++    Diligent::TextureViewDesc srv_desc;
++    srv_desc.ViewType = Diligent::TEXTURE_VIEW_SHADER_RESOURCE;
++    srv_desc.TextureDim = Diligent::RESOURCE_DIM_TEX_2D;
++    srv_desc.Format = Diligent::TEX_FORMAT_RGB10A2_UNORM;
++    srv_desc.Name = "ImportedGuestOutputSRV";
++    srv_desc.Swizzle = Diligent::TextureComponentMapping(
++        Diligent::TEXTURE_COMPONENT_SWIZZLE_B,
++        Diligent::TEXTURE_COMPONENT_SWIZZLE_G,
++        Diligent::TEXTURE_COMPONENT_SWIZZLE_R,
++        Diligent::TEXTURE_COMPONENT_SWIZZLE_A);
++    impl_->imported_texture->CreateView(srv_desc, &impl_->imported_srv);
++    if (!impl_->imported_srv) {
++      REXLOG_ERROR("NativeDevice: Failed to create swizzled SRV for imported texture");
++      return false;
++    }
++    if (tex_var && impl_->imported_srv) tex_var->Set(impl_->imported_srv);
++
++    impl_->imported_handle = shared_handle;
++    impl_->imported_w = width;
++    impl_->imported_h = height;
++    REXLOG_INFO("NativeDevice: imported D3D12 shared texture ({}x{}, handle={:#x})",
++                width, height, reinterpret_cast<uintptr_t>(shared_handle));
++  }
++
++  auto* rtv = impl_->swapchain->GetCurrentBackBufferRTV();
++  auto* dsv = impl_->swapchain->GetDepthBufferDSV();
++  impl_->context->SetRenderTargets(1, &rtv, dsv,
++                                   Diligent::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
++
++  const float clear_color[] = {0.0f, 0.0f, 0.0f, 1.0f};
++  impl_->context->ClearRenderTarget(rtv, clear_color,
++                                    Diligent::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
++
++  impl_->setBlitViewport();
++
++  impl_->context->SetPipelineState(impl_->blit_pipeline);
++  impl_->context->CommitShaderResources(
++      impl_->imported_srb, Diligent::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
++  Diligent::DrawAttribs da;
++  da.NumVertices = 3;
++  da.Flags = Diligent::DRAW_FLAG_VERIFY_ALL;
++  impl_->context->Draw(da);
++
++  const auto present_start = timings ? Clock::now() : Clock::time_point{};
++  impl_->swapchain->Present(sync_interval);
++  impl_->context->Flush();
++  impl_->context->WaitForIdle();
++  if (timings) {
++    timings->upload_draw_cpu_ms =
++        std::chrono::duration<double, std::milli>(present_start - upload_start).count();
++    timings->present_cpu_ms =
++        std::chrono::duration<double, std::milli>(Clock::now() - present_start).count();
++  }
++  return true;
++#endif
++}
++
++void NativeDevice::resize(uint32_t width, uint32_t height) {
++  if (!impl_->initialized) return;
++  if (width == 0 || height == 0) return;
++  impl_->swapchain->Resize(width, height,
++                           Diligent::SURFACE_TRANSFORM_OPTIMAL);
++}
++
++void NativeDevice::shutdown() {
++  if (impl_->context) {
++    impl_->context->Flush();
++    impl_->context->WaitForIdle();
++    impl_->context->FinishFrame();
++  }
++  impl_->current_pipeline = nullptr;
++
++  if (impl_->blit_srb) { impl_->blit_srb->Release(); impl_->blit_srb = nullptr; }
++  if (impl_->blit_texture) { impl_->blit_texture->Release(); impl_->blit_texture = nullptr; }
++  if (impl_->blit_sampler) { impl_->blit_sampler->Release(); impl_->blit_sampler = nullptr; }
++  if (impl_->blit_pipeline) { impl_->blit_pipeline->Release(); impl_->blit_pipeline = nullptr; }
++  impl_->blit_texture_w = 0;
++  impl_->blit_texture_h = 0;
++
++  if (impl_->imported_srb) { impl_->imported_srb->Release(); impl_->imported_srb = nullptr; }
++  if (impl_->imported_srv) { impl_->imported_srv->Release(); impl_->imported_srv = nullptr; }
++  if (impl_->imported_texture) { impl_->imported_texture->Release(); impl_->imported_texture = nullptr; }
++  if (impl_->imported_vk_image != VK_NULL_HANDLE) {
++    vkDestroyImage(static_cast<Diligent::IRenderDeviceVk*>(impl_->device)->GetVkDevice(),
++                   impl_->imported_vk_image, nullptr);
++    impl_->imported_vk_image = VK_NULL_HANDLE;
++  }
++  if (impl_->imported_vk_memory != VK_NULL_HANDLE) {
++    vkFreeMemory(static_cast<Diligent::IRenderDeviceVk*>(impl_->device)->GetVkDevice(),
++                 impl_->imported_vk_memory, nullptr);
++    impl_->imported_vk_memory = VK_NULL_HANDLE;
++  }
++  impl_->imported_handle = nullptr;
++  impl_->imported_w = 0;
++  impl_->imported_h = 0;
++  impl_->ext_memory_supported = false;
++
++  if (impl_->swapchain) { impl_->swapchain->Release(); impl_->swapchain = nullptr; }
++  if (impl_->context) { impl_->context->Release(); impl_->context = nullptr; }
++  if (impl_->device) { impl_->device->Release(); impl_->device = nullptr; }
++
++  impl_->initialized = false;
++}
++
++bool NativeDevice::is_valid() const {
++  return impl_ && impl_->initialized;
++}
++
++static Diligent::VALUE_TYPE toValueType(VertexFormat fmt) {
++  switch (fmt) {
++    case VertexFormat::Float32:
++    case VertexFormat::Float32x2:
++    case VertexFormat::Float32x3:
++    case VertexFormat::Float32x4:
++      return Diligent::VT_FLOAT32;
++    case VertexFormat::UNorm8x4:
++      return Diligent::VT_UINT8;
++  }
++  return Diligent::VT_FLOAT32;
++}
++
++static uint8_t componentCount(VertexFormat fmt) {
++  switch (fmt) {
++    case VertexFormat::Float32:   return 1;
++    case VertexFormat::Float32x2: return 2;
++    case VertexFormat::Float32x3: return 3;
++    case VertexFormat::Float32x4: return 4;
++    case VertexFormat::UNorm8x4:  return 4;
++  }
++  return 0;
++}
++
++static bool isNormalized(VertexFormat fmt) {
++  return fmt == VertexFormat::UNorm8x4;
++}
++
++static Diligent::TEXTURE_FORMAT toTextureFormat(TextureFormat fmt) {
++  switch (fmt) {
++    case TextureFormat::RGBA8_UNorm:      return Diligent::TEX_FORMAT_RGBA8_UNORM;
++    case TextureFormat::RGBA8_UNorm_sRGB: return Diligent::TEX_FORMAT_RGBA8_UNORM_SRGB;
++    case TextureFormat::BGRA8_UNorm:      return Diligent::TEX_FORMAT_BGRA8_UNORM;
++    case TextureFormat::BGRA8_UNorm_sRGB: return Diligent::TEX_FORMAT_BGRA8_UNORM_SRGB;
++    case TextureFormat::R8_UNorm:         return Diligent::TEX_FORMAT_R8_UNORM;
++    case TextureFormat::BC1_UNorm:        return Diligent::TEX_FORMAT_BC1_UNORM;
++    case TextureFormat::BC3_UNorm:        return Diligent::TEX_FORMAT_BC3_UNORM;
++    case TextureFormat::BC7_UNorm:        return Diligent::TEX_FORMAT_BC7_UNORM;
++    default:                              return Diligent::TEX_FORMAT_RGBA8_UNORM;
++  }
++}
++
++static Diligent::FILTER_TYPE toFilterType(TextureFilter f) {
++  switch (f) {
++    case TextureFilter::Point:       return Diligent::FILTER_TYPE_POINT;
++    case TextureFilter::Linear:      return Diligent::FILTER_TYPE_LINEAR;
++    case TextureFilter::Anisotropic: return Diligent::FILTER_TYPE_ANISOTROPIC;
++    default:                         return Diligent::FILTER_TYPE_LINEAR;
++  }
++}
++
++static Diligent::TEXTURE_ADDRESS_MODE toAddressMode(TextureAddress a) {
++  switch (a) {
++    case TextureAddress::Wrap:   return Diligent::TEXTURE_ADDRESS_WRAP;
++    case TextureAddress::Clamp:  return Diligent::TEXTURE_ADDRESS_CLAMP;
++    case TextureAddress::Mirror: return Diligent::TEXTURE_ADDRESS_MIRROR;
++    default:                     return Diligent::TEXTURE_ADDRESS_WRAP;
++  }
++}
++
++NativeBuffer* NativeDevice::createBuffer(const BufferDesc& desc,
++                                          const void* initial_data) {
++  if (!impl_->initialized) return nullptr;
++
++  Diligent::BufferDesc bd;
++  bd.Size = desc.size_bytes;
++
++  if (desc.is_index_buffer) {
++    bd.BindFlags = Diligent::BIND_INDEX_BUFFER;
++  } else {
++    bd.BindFlags = Diligent::BIND_VERTEX_BUFFER;
++  }
++
++  bd.Usage = Diligent::USAGE_IMMUTABLE;
++  bd.CPUAccessFlags = Diligent::CPU_ACCESS_NONE;
++
++  Diligent::BufferData bd_init;
++  bd_init.pData = initial_data;
++  bd_init.DataSize = desc.size_bytes;
++
++  Diligent::IBuffer* buf = nullptr;
++  impl_->device->CreateBuffer(bd, initial_data ? &bd_init : nullptr, &buf);
++  if (!buf) {
++    REXLOG_ERROR("NativeDevice: Failed to create buffer ({} bytes)", desc.size_bytes);
++    return nullptr;
++  }
++
++  auto* handle = new NativeBuffer();
++  handle->buffer = buf;
++  return handle;
++}
++
++void NativeDevice::destroyBuffer(NativeBuffer* buffer) {
++  if (!buffer) return;
++  if (buffer->buffer) buffer->buffer->Release();
++  delete buffer;
++}
++
++NativeBuffer* NativeDevice::createUniformBuffer(uint32_t size_bytes) {
++  if (!impl_->initialized) return nullptr;
++
++  Diligent::BufferDesc bd;
++  bd.Size = size_bytes;
++  bd.BindFlags = Diligent::BIND_UNIFORM_BUFFER;
++  bd.Usage = Diligent::USAGE_DEFAULT;
++  bd.CPUAccessFlags = Diligent::CPU_ACCESS_NONE;
++
++  Diligent::IBuffer* buf = nullptr;
++  impl_->device->CreateBuffer(bd, nullptr, &buf);
++  if (!buf) {
++    REXLOG_ERROR("NativeDevice: Failed to create uniform buffer ({} bytes)", size_bytes);
++    return nullptr;
++  }
++
++  auto* handle = new NativeBuffer();
++  handle->buffer = buf;
++  return handle;
++}
++
++void NativeDevice::updateUniformBuffer(NativeBuffer* buffer, const void* data,
++                                        uint32_t size_bytes) {
++  if (!impl_->initialized || !buffer || !data) return;
++  impl_->context->UpdateBuffer(buffer->buffer, 0, size_bytes, data,
++                               Diligent::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
++}
++
++void NativeDevice::bindUniformBuffer(uint8_t shader_stage, uint8_t binding_slot,
++                                      NativeBuffer* buffer) {
++  if (!impl_->initialized || !buffer || !impl_->current_pipeline) return;
++
++  Diligent::SHADER_TYPE stage;
++  switch (shader_stage) {
++    case 0: stage = Diligent::SHADER_TYPE_VERTEX; break;
++    case 1: stage = Diligent::SHADER_TYPE_PIXEL; break;
++    case 2: stage = Diligent::SHADER_TYPE_VERTEX | Diligent::SHADER_TYPE_PIXEL; break;
++    default: return;
++  }
++
++  static const char* kSlotNames[] = {
++    "CameraCB",
++    "MaterialCB",
++    "ObjectCB",
++    "SceneCB",
++  };
++  const char* name = (binding_slot < 4) ? kSlotNames[binding_slot] : nullptr;
++  if (!name) return;
++
++  auto* var = impl_->current_pipeline->GetStaticVariableByName(stage, name);
++  if (var) {
++    var->Set(buffer->buffer);
++  }
++}
++
++NativeTexture* NativeDevice::createTexture(const TextureDesc& desc) {
++  if (!impl_->initialized) return nullptr;
++
++  Diligent::TextureDesc tex_desc;
++  tex_desc.Type = Diligent::RESOURCE_DIM_TEX_2D;
++  tex_desc.Width = desc.width;
++  tex_desc.Height = desc.height;
++  tex_desc.MipLevels = desc.mip_levels;
++  tex_desc.Format = toTextureFormat(desc.format);
++  tex_desc.BindFlags = Diligent::BIND_SHADER_RESOURCE;
++  tex_desc.Usage = Diligent::USAGE_IMMUTABLE;
++  tex_desc.Name = "NativeTexture";
++
++  Diligent::TextureSubResData sub_res;
++  sub_res.pData = desc.initial_data;
++  sub_res.Stride = desc.width * 4;
++
++  if (desc.format == TextureFormat::BC1_UNorm ||
++      desc.format == TextureFormat::BC3_UNorm ||
++      desc.format == TextureFormat::BC7_UNorm) {
++    uint32_t block_size = (desc.format == TextureFormat::BC1_UNorm) ? 8 : 16;
++    uint32_t blocks_x = (desc.width + 3) / 4;
++    sub_res.Stride = blocks_x * block_size;
++  } else if (desc.format == TextureFormat::R8_UNorm) {
++    sub_res.Stride = desc.width;
++  }
++
++  Diligent::TextureData tex_data;
++  tex_data.pContext = impl_->context;
++  tex_data.NumSubresources = 1;
++  tex_data.pSubResources = &sub_res;
++
++  Diligent::ITexture* tex = nullptr;
++  impl_->device->CreateTexture(tex_desc, desc.initial_data ? &tex_data : nullptr, &tex);
++  if (!tex) {
++    REXLOG_ERROR("NativeDevice: Failed to create texture ({}x{})",
++                 desc.width, desc.height);
++    return nullptr;
++  }
++
++  Diligent::ISampler* sampler = nullptr;
++  Diligent::SamplerDesc sdesc;
++  if (desc.use_custom_sampler) {
++    sdesc.MinFilter = toFilterType(desc.sampler.min_filter);
++    sdesc.MagFilter = toFilterType(desc.sampler.mag_filter);
++    sdesc.MipFilter = toFilterType(desc.sampler.mip_filter);
++    sdesc.AddressU = toAddressMode(desc.sampler.address_u);
++    sdesc.AddressV = toAddressMode(desc.sampler.address_v);
++    if (desc.sampler.max_anisotropy > 0) {
++      sdesc.MinFilter = Diligent::FILTER_TYPE_ANISOTROPIC;
++      sdesc.MagFilter = Diligent::FILTER_TYPE_ANISOTROPIC;
++      sdesc.MipFilter = Diligent::FILTER_TYPE_ANISOTROPIC;
++      sdesc.MaxAnisotropy = desc.sampler.max_anisotropy;
++    }
++  } else {
++    sdesc.MinFilter = Diligent::FILTER_TYPE_LINEAR;
++    sdesc.MagFilter = Diligent::FILTER_TYPE_LINEAR;
++    sdesc.MipFilter = Diligent::FILTER_TYPE_LINEAR;
++    sdesc.AddressU = Diligent::TEXTURE_ADDRESS_WRAP;
++    sdesc.AddressV = Diligent::TEXTURE_ADDRESS_WRAP;
++  }
++  sdesc.Name = "NativeSampler";
++  impl_->device->CreateSampler(sdesc, &sampler);
++
++  auto* handle = new NativeTexture();
++  handle->texture = tex;
++  handle->sampler = sampler;
++  return handle;
++}
++
++void NativeDevice::destroyTexture(NativeTexture* texture) {
++  if (!texture) return;
++  if (texture->sampler) texture->sampler->Release();
++  if (texture->texture) texture->texture->Release();
++  delete texture;
++}
++
++void NativeDevice::bindTexture(uint8_t shader_stage, uint8_t binding_slot,
++                                NativeTexture* texture) {
++  if (!impl_->initialized || !texture || !impl_->current_pipeline) return;
++
++  Diligent::SHADER_TYPE stage;
++  switch (shader_stage) {
++    case 0: stage = Diligent::SHADER_TYPE_VERTEX; break;
++    case 1: stage = Diligent::SHADER_TYPE_PIXEL; break;
++    case 2: stage = Diligent::SHADER_TYPE_VERTEX | Diligent::SHADER_TYPE_PIXEL; break;
++    default: return;
++  }
++
++  static const char* kTexSlotNames[] = {
++    "g_Texture",
++    "g_Texture2",
++    "g_Texture3",
++    "g_Texture4",
++  };
++  static const char* kSamplerSlotNames[] = {
++    "g_Sampler",
++    "g_Sampler2",
++    "g_Sampler3",
++    "g_Sampler4",
++  };
++  const char* tex_name = (binding_slot < 4) ? kTexSlotNames[binding_slot] : nullptr;
++  const char* samp_name = (binding_slot < 4) ? kSamplerSlotNames[binding_slot] : nullptr;
++  if (!tex_name) return;
++
++  auto* sr_view = texture->texture->GetDefaultView(Diligent::TEXTURE_VIEW_SHADER_RESOURCE);
++  if (sr_view) {
++    auto* var = impl_->current_pipeline->GetStaticVariableByName(stage, tex_name);
++    if (var) var->Set(sr_view);
++  }
++
++  if (texture->sampler && samp_name) {
++    auto* samp_var = impl_->current_pipeline->GetStaticVariableByName(stage, samp_name);
++    if (samp_var) samp_var->Set(texture->sampler);
++  }
++}
++
++NativePipeline* NativeDevice::createPipeline(const PipelineDesc& desc) {
++  if (!impl_->initialized) return nullptr;
++
++  Diligent::ShaderCreateInfo vs_ci;
++  vs_ci.SourceLanguage = Diligent::SHADER_SOURCE_LANGUAGE_HLSL;
++  vs_ci.Source = desc.vertex_shader_source;
++  vs_ci.EntryPoint = "main";
++  vs_ci.Desc.ShaderType = Diligent::SHADER_TYPE_VERTEX;
++  vs_ci.Desc.Name = "NativeVS";
++
++  Diligent::IShader* vs = nullptr;
++  impl_->device->CreateShader(vs_ci, &vs);
++  if (!vs) {
++    REXLOG_ERROR("NativeDevice: Failed to compile vertex shader");
++    return nullptr;
++  }
++
++  Diligent::ShaderCreateInfo ps_ci;
++  ps_ci.SourceLanguage = Diligent::SHADER_SOURCE_LANGUAGE_HLSL;
++  ps_ci.Source = desc.pixel_shader_source;
++  ps_ci.EntryPoint = "main";
++  ps_ci.Desc.ShaderType = Diligent::SHADER_TYPE_PIXEL;
++  ps_ci.Desc.Name = "NativePS";
++
++  Diligent::IShader* ps = nullptr;
++  impl_->device->CreateShader(ps_ci, &ps);
++  if (!ps) {
++    REXLOG_ERROR("NativeDevice: Failed to compile pixel shader");
++    vs->Release();
++    return nullptr;
++  }
++
++  std::vector<Diligent::LayoutElement> layout_elems;
++  layout_elems.reserve(desc.vertex_element_count);
++  for (uint32_t i = 0; i < desc.vertex_element_count; i++) {
++    const auto& ve = desc.vertex_elements[i];
++    Diligent::LayoutElement le;
++    le.InputIndex = i;
++    le.BufferSlot = ve.binding;
++    le.NumComponents = componentCount(ve.format);
++    le.ValueType = toValueType(ve.format);
++    le.IsNormalized = isNormalized(ve.format) ? Diligent::True : Diligent::False;
++    le.RelativeOffset = ve.offset;
++    le.Stride = 0;
++    layout_elems.push_back(le);
++  }
++
++  if (!layout_elems.empty()) {
++    uint32_t max_offset = 0;
++    for (uint32_t i = 0; i < desc.vertex_element_count; i++) {
++      const auto& ve = desc.vertex_elements[i];
++      uint32_t elem_size = 0;
++      switch (ve.format) {
++        case VertexFormat::Float32:   elem_size = 4; break;
++        case VertexFormat::Float32x2: elem_size = 8; break;
++        case VertexFormat::Float32x3: elem_size = 12; break;
++        case VertexFormat::Float32x4: elem_size = 16; break;
++        case VertexFormat::UNorm8x4:  elem_size = 4; break;
++      }
++      max_offset = (std::max)(max_offset, static_cast<uint32_t>(ve.offset) + elem_size);
++    }
++    for (auto& le : layout_elems) {
++      le.Stride = max_offset;
++    }
++  }
++
++  Diligent::GraphicsPipelineStateCreateInfo pso_ci;
++  pso_ci.PSODesc.Name = "NativePipeline";
++  pso_ci.PSODesc.PipelineType = Diligent::PIPELINE_TYPE_GRAPHICS;
++
++  pso_ci.pVS = vs;
++  pso_ci.pPS = ps;
++
++  const auto& sc_desc = impl_->swapchain->GetDesc();
++  pso_ci.GraphicsPipeline.NumRenderTargets = 1;
++  pso_ci.GraphicsPipeline.RTVFormats[0] = sc_desc.ColorBufferFormat;
++  pso_ci.GraphicsPipeline.DSVFormat = sc_desc.DepthBufferFormat;
++
++  switch (desc.topology) {
++    case PrimitiveTopology::TriangleList:
++      pso_ci.GraphicsPipeline.PrimitiveTopology = Diligent::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++      break;
++    case PrimitiveTopology::TriangleStrip:
++      pso_ci.GraphicsPipeline.PrimitiveTopology = Diligent::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
++      break;
++    case PrimitiveTopology::LineList:
++      pso_ci.GraphicsPipeline.PrimitiveTopology = Diligent::PRIMITIVE_TOPOLOGY_LINE_LIST;
++      break;
++  }
++
++  pso_ci.GraphicsPipeline.DepthStencilDesc.DepthEnable = Diligent::False;
++
++  auto& rt0 = pso_ci.GraphicsPipeline.BlendDesc.RenderTargets[0];
++  rt0.BlendEnable = Diligent::False;
++  rt0.RenderTargetWriteMask = Diligent::COLOR_MASK_ALL;
++
++  pso_ci.GraphicsPipeline.InputLayout.LayoutElements =
++      layout_elems.data();
++  pso_ci.GraphicsPipeline.InputLayout.NumElements =
++      static_cast<uint32_t>(layout_elems.size());
++
++  pso_ci.PSODesc.ResourceLayout.DefaultVariableType =
++      Diligent::SHADER_RESOURCE_VARIABLE_TYPE_STATIC;
++
++  Diligent::IPipelineState* pso = nullptr;
++  impl_->device->CreateGraphicsPipelineState(pso_ci, &pso);
++  if (!pso) {
++    REXLOG_ERROR("NativeDevice: Failed to create pipeline state");
++    vs->Release();
++    ps->Release();
++    return nullptr;
++  }
++
++  vs->Release();
++  ps->Release();
++
++  auto* handle = new NativePipeline();
++  handle->pipeline = pso;
++  return handle;
++}
++
++void NativeDevice::destroyPipeline(NativePipeline* pipeline) {
++  if (!pipeline) return;
++  if (pipeline->pipeline) pipeline->pipeline->Release();
++  delete pipeline;
++}
++
++void NativeDevice::bindPipeline(NativePipeline* pipeline) {
++  if (!impl_->initialized || !pipeline) return;
++  impl_->context->SetPipelineState(pipeline->pipeline);
++  impl_->current_pipeline = pipeline->pipeline;
++}
++
++void NativeDevice::bindVertexBuffer(uint32_t binding, NativeBuffer* buffer,
++                                     uint32_t stride) {
++  if (!impl_->initialized || !buffer) return;
++  Diligent::IBuffer* buf = buffer->buffer;
++  uint64_t offset = 0;
++  impl_->context->SetVertexBuffers(binding, 1, &buf, &offset,
++                                   Diligent::RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
++                                   Diligent::SET_VERTEX_BUFFERS_FLAG_RESET);
++}
++
++void NativeDevice::bindIndexBuffer(NativeBuffer* buffer) {
++  if (!impl_->initialized || !buffer) return;
++  impl_->context->SetIndexBuffer(buffer->buffer, 0,
++                                 Diligent::RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
++}
++
++void NativeDevice::draw(uint32_t vertex_count, uint32_t first_vertex) {
++  if (!impl_->initialized) return;
++  Diligent::DrawAttribs da;
++  da.NumVertices = vertex_count;
++  da.StartVertexLocation = first_vertex;
++  da.Flags = Diligent::DRAW_FLAG_VERIFY_ALL;
++  impl_->context->Draw(da);
++}
++
++void NativeDevice::drawIndexed(uint32_t index_count, uint32_t first_index,
++                                uint32_t vertex_offset) {
++  if (!impl_->initialized) return;
++  Diligent::DrawIndexedAttribs da;
++  da.NumIndices = index_count;
++  da.FirstIndexLocation = first_index;
++  da.BaseVertex = vertex_offset;
++  da.IndexType = Diligent::VT_UINT16;
++  da.Flags = Diligent::DRAW_FLAG_VERIFY_ALL;
++  impl_->context->DrawIndexed(da);
++}
++
++}
+diff --git a/src/native_renderer/native_device.h b/src/native_renderer/native_device.h
+new file mode 100644
+index 0000000..69f2917
+--- /dev/null
++++ b/src/native_renderer/native_device.h
+@@ -0,0 +1,196 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++
++namespace dante {
++
++struct NativeBuffer;
++struct NativePipeline;
++struct NativeTexture;
++
++enum class VertexSemantic : uint8_t {
++  Position,
++  Normal,
++  Color,
++  TexCoord0,
++  TexCoord1,
++};
++
++enum class VertexFormat : uint8_t {
++  Float32,
++  Float32x2,
++  Float32x3,
++  Float32x4,
++  UNorm8x4,
++};
++
++struct VertexElement {
++  VertexSemantic semantic;
++  VertexFormat format;
++  uint8_t offset;
++  uint8_t binding;
++};
++
++enum class PrimitiveTopology : uint8_t {
++  TriangleList,
++  TriangleStrip,
++  LineList,
++};
++
++struct BufferDesc {
++  uint32_t size_bytes;
++  bool is_index_buffer = false;
++  bool index_32bit = false;
++};
++
++struct UniformBufferBinding {
++  uint8_t shader_stage;
++  uint8_t binding_slot;
++};
++
++enum class TextureFormat : uint8_t {
++  RGBA8_UNorm,
++  RGBA8_UNorm_sRGB,
++  BGRA8_UNorm,
++  BGRA8_UNorm_sRGB,
++  R8_UNorm,
++  BC1_UNorm,
++  BC3_UNorm,
++  BC7_UNorm,
++};
++
++enum class TextureFilter : uint8_t {
++  Point,
++  Linear,
++  Anisotropic,
++};
++
++enum class TextureAddress : uint8_t {
++  Wrap,
++  Clamp,
++  Mirror,
++};
++
++struct SamplerDesc {
++  TextureFilter min_filter = TextureFilter::Linear;
++  TextureFilter mag_filter = TextureFilter::Linear;
++  TextureFilter mip_filter = TextureFilter::Linear;
++  TextureAddress address_u = TextureAddress::Wrap;
++  TextureAddress address_v = TextureAddress::Wrap;
++  uint8_t max_anisotropy = 0;
++};
++
++struct TextureDesc {
++  uint32_t width;
++  uint32_t height;
++  uint32_t mip_levels = 1;
++  TextureFormat format;
++  const void* initial_data = nullptr;
++  uint32_t data_size = 0;
++  bool use_custom_sampler = false;
++  SamplerDesc sampler;
++};
++
++struct PipelineDesc {
++  const VertexElement* vertex_elements;
++  uint32_t vertex_element_count;
++  PrimitiveTopology topology;
++  const char* vertex_shader_source;
++  const char* pixel_shader_source;
++  const UniformBufferBinding* uniform_bindings;
++  uint32_t uniform_binding_count;
++};
++
++struct NativePresentTimings {
++  double upload_draw_cpu_ms = 0.0;
++  double present_cpu_ms = 0.0;
++};
++
++struct NativeSwapchainDesc {
++  uint32_t Width = 0;
++  uint32_t Height = 0;
++};
++
++class NativeDevice {
++ public:
++  static constexpr bool kGpuInteropValidated = true;
++
++  NativeDevice();
++  ~NativeDevice();
++
++  NativeDevice(const NativeDevice&) = delete;
++  NativeDevice& operator=(const NativeDevice&) = delete;
++
++  bool initialize(void* hwnd, uint32_t width, uint32_t height);
++
++  void beginFrame();
++
++  void clear(float r, float g, float b, float a);
++
++  void present(uint32_t sync_interval = 1);
++
++  bool presentImage(uint32_t width, uint32_t height, const void* rgba_data,
++                    size_t row_stride, uint32_t sync_interval = 1,
++                    NativePresentTimings* timings = nullptr);
++
++  bool presentImageShared(void* shared_handle, uint32_t width, uint32_t height,
++                          uint32_t sync_interval = 1,
++                          NativePresentTimings* timings = nullptr,
++                          uint32_t adapter_luid_low = 0,
++                          int32_t adapter_luid_high = 0);
++
++  void setDisplayAspect(double aspect, bool letterbox);
++
++  bool updateWindowSize();
++
++  NativeSwapchainDesc swapchainDesc() const;
++
++  void resize(uint32_t width, uint32_t height);
++
++  void shutdown();
++
++  bool is_valid() const;
++
++  NativeBuffer* createBuffer(const BufferDesc& desc, const void* initial_data);
++
++  void destroyBuffer(NativeBuffer* buffer);
++
++  NativeBuffer* createUniformBuffer(uint32_t size_bytes);
++
++  void updateUniformBuffer(NativeBuffer* buffer, const void* data,
++                           uint32_t size_bytes);
++
++  void bindUniformBuffer(uint8_t shader_stage, uint8_t binding_slot,
++                         NativeBuffer* buffer);
++
++  NativeTexture* createTexture(const TextureDesc& desc);
++
++  void destroyTexture(NativeTexture* texture);
++
++  void bindTexture(uint8_t shader_stage, uint8_t binding_slot,
++                   NativeTexture* texture);
++
++  NativePipeline* createPipeline(const PipelineDesc& desc);
++
++  void destroyPipeline(NativePipeline* pipeline);
++
++  void bindPipeline(NativePipeline* pipeline);
++
++  void bindVertexBuffer(uint32_t binding, NativeBuffer* buffer, uint32_t stride);
++
++  void bindIndexBuffer(NativeBuffer* buffer);
++
++  void draw(uint32_t vertex_count, uint32_t first_vertex = 0);
++
++  void drawIndexed(uint32_t index_count, uint32_t first_index = 0,
++                   uint32_t vertex_offset = 0);
++
++ private:
++  bool initializeBlitPipeline();
++
++  struct Impl;
++  Impl* impl_ = nullptr;
++};
++
++}
+diff --git a/src/native_renderer/native_presenter.cpp b/src/native_renderer/native_presenter.cpp
+new file mode 100644
+index 0000000..70954a5
+--- /dev/null
++++ b/src/native_renderer/native_presenter.cpp
+@@ -0,0 +1,378 @@
++#include "native_presenter.h"
++#include "native_device.h"
++
++#include <rex/ui/presenter.h>
++#include <rex/ui/window.h>
++#include <rex/cvar.h>
++#include <rex/logging/macros.h>
++
++#include <atomic>
++#include <chrono>
++#include <cstring>
++#include <thread>
++
++namespace dante {
++
++REXCVAR_DEFINE_BOOL(use_native_presenter, false, "Graphics",
++                    "Use native DiligentCore/Vulkan presenter instead of "
++                    "ReXGlue's D3D12 presenter (Step 1 hybrid renderer)");
++
++REXCVAR_DEFINE_BOOL(use_gpu_interop, false, "Graphics",
++                    "Request experimental D3D12->Vulkan texture sharing; "
++                    "falls back to CPU while external ownership is unverified");
++
++static void computeLetterbox(NativeDevice& device, uint32_t display_x,
++                             uint32_t display_y) {
++  const double configured_aspect =
++      rex::cvar::Query<double>("ultrawide_target_aspect");
++  double aspect = configured_aspect;
++  if (!(aspect > 0.0)) {
++    aspect = display_x && display_y ? double(display_x) / display_y :
++        double(rex::cvar::Query<int32_t>("video_mode_width")) /
++        rex::cvar::Query<int32_t>("video_mode_height");
++  }
++  device.setDisplayAspect(aspect, rex::cvar::Query<bool>("present_letterbox"));
++}
++
++struct NativePresenter::Impl {
++  NativeDevice device;
++  rex::ui::Presenter* rex_presenter = nullptr;
++  rex::ui::Window* window = nullptr;
++  bool presenter_disconnected = false;
++  std::atomic<bool> running{false};
++  std::atomic<bool> stop_requested{false};
++  std::thread present_thread;
++  uint64_t last_frame_count = 0;
++  bool gpu_interop_active = false;
++  bool gpu_interop_failed = false;
++
++  ~Impl() {
++    stop();
++  }
++
++  void stop() {
++    stop_requested.store(true);
++    if (present_thread.joinable())
++      present_thread.join();
++    running.store(false);
++  }
++
++  void presentLoop() {
++    REXLOG_INFO("NativePresenter: present thread started; guest_vsync={} "
++                "host_vsync={} time_scalar={} video_mode_hz={} resolution_scale={} "
++                "swap_post_effect={} use_gpu_interop={}",
++                rex::cvar::Query<bool>("vsync"),
++                rex::cvar::Query<bool>("d3d12_host_vsync"),
++                rex::cvar::Query<double>("time_scalar"),
++                rex::cvar::Query<double>("video_mode_refresh_rate"),
++                rex::cvar::Query<int32_t>("resolution_scale"),
++                rex::cvar::Query<std::string>("swap_post_effect"),
++                rex::cvar::Query<bool>("use_gpu_interop"));
++
++    gpu_interop_active = rex::cvar::Query<bool>("use_gpu_interop");
++    gpu_interop_failed = false;
++    if (gpu_interop_active) {
++      REXLOG_INFO("NativePresenter: GPU interop requested; will fall back to "
++                  "CPU readback if initialization fails at runtime");
++    }
++
++    constexpr int kMaxStartupWaitMs = 10000;
++    auto start = std::chrono::steady_clock::now();
++    while (!stop_requested.load()) {
++      uint64_t fc = rex_presenter->guest_frame_count();
++      if (fc > 0) {
++        REXLOG_INFO("NativePresenter: first guest frame detected (count={})", fc);
++        break;
++      }
++      auto elapsed = std::chrono::steady_clock::now() - start;
++      if (std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
++          > kMaxStartupWaitMs) {
++        REXLOG_WARN("NativePresenter: no guest frames after {}ms, "
++                    "presenting clear", kMaxStartupWaitMs);
++        device.beginFrame();
++        device.clear(0.0f, 0.0f, 0.0f, 1.0f);
++        device.present(rex::cvar::Query<bool>("d3d12_host_vsync") ? 1 : 0);
++        break;
++      }
++      std::this_thread::sleep_for(std::chrono::milliseconds(50));
++    }
++
++    uint64_t capture_ok_count = 0;
++    uint64_t capture_fail_count = 0;
++    uint64_t empty_image_count = 0;
++    uint64_t interop_ok_count = 0;
++    uint64_t interop_fail_count = 0;
++    uint64_t log_counter = 0;
++    using Clock = std::chrono::steady_clock;
++    auto timing_start = Clock::now();
++    uint64_t timing_guest_start = rex_presenter->guest_frame_count();
++    uint64_t timing_captures = 0;
++    uint64_t timing_attempts = 0;
++    uint64_t timing_presented = 0;
++    uint32_t timing_windows = 0;
++    uint32_t last_sync_interval = UINT32_MAX;
++    double capture_cpu_ms = 0.0;
++    double upload_draw_cpu_ms = 0.0;
++    double present_cpu_ms = 0.0;
++
++    while (!stop_requested.load()) {
++      if (!device.updateWindowSize()) {
++        std::this_thread::sleep_for(std::chrono::milliseconds(50));
++        continue;
++      }
++      uint64_t current_count = rex_presenter->guest_frame_count();
++      const uint32_t sync_interval =
++          rex::cvar::Query<bool>("d3d12_host_vsync") ? 1 : 0;
++      if (sync_interval != last_sync_interval) {
++        REXLOG_INFO("NativePresenter: host_sync_interval={} guest_vsync={} time_scalar={}",
++                    sync_interval, rex::cvar::Query<bool>("vsync"),
++                    rex::cvar::Query<double>("time_scalar"));
++        last_sync_interval = sync_interval;
++      }
++      const bool measure = timing_windows < 3;
++
++      if (current_count != last_frame_count) {
++        last_frame_count = current_count;
++
++        if (gpu_interop_active && !gpu_interop_failed) {
++          rex::ui::Presenter::GuestOutputSharedTexture shared;
++          const auto capture_start = measure ? Clock::now() : Clock::time_point{};
++          const bool got_shared = rex_presenter->GetGuestOutputSharedTexture(shared);
++          if (measure) {
++            capture_cpu_ms += std::chrono::duration<double, std::milli>(
++                Clock::now() - capture_start).count();
++            ++timing_attempts;
++          }
++          if (got_shared && shared.handle && shared.width > 0 && shared.height > 0) {
++            computeLetterbox(device, 0, 0);
++            NativePresentTimings timings;
++            if (measure) ++timing_captures;
++            if (!device.presentImageShared(shared.handle, shared.width,
++                                           shared.height, sync_interval,
++                                           measure ? &timings : nullptr,
++                                           shared.adapter_luid_low,
++                                           shared.adapter_luid_high)) {
++              interop_fail_count++;
++              if (interop_fail_count <= 3) {
++                REXLOG_WARN("NativePresenter: presentImageShared failed (count={}), "
++                            "falling back to CPU readback",
++                            interop_fail_count);
++              }
++              if (interop_fail_count >= 3) {
++                REXLOG_WARN("NativePresenter: GPU interop failed {} times, "
++                            "disabling and falling back to CPU readback",
++                            interop_fail_count);
++                gpu_interop_failed = true;
++                rex_presenter->ReleaseGuestOutputSharedTexture();
++              }
++            } else {
++              interop_ok_count++;
++              rex_presenter->ReleaseGuestOutputSharedTexture();
++              if (measure) {
++                ++timing_presented;
++                upload_draw_cpu_ms += timings.upload_draw_cpu_ms;
++                present_cpu_ms += timings.present_cpu_ms;
++              }
++              if (interop_ok_count == 1 || interop_ok_count == 60 ||
++                  interop_ok_count == 300) {
++                REXLOG_INFO("NativePresenter: interop={} shared={}x{} "
++                            "handle={:#x}",
++                            interop_ok_count, shared.width, shared.height,
++                            reinterpret_cast<uintptr_t>(shared.handle));
++              }
++            }
++          } else {
++            interop_fail_count++;
++            if (interop_fail_count <= 3) {
++              REXLOG_WARN("NativePresenter: GetGuestOutputSharedTexture failed "
++                          "(count={}), trying CPU readback",
++                          interop_fail_count);
++            }
++            if (interop_fail_count >= 3) {
++              gpu_interop_failed = true;
++            }
++          }
++        }
++
++        if (!gpu_interop_active || gpu_interop_failed) {
++          rex::ui::RawImage image;
++          const auto capture_start = measure ? Clock::now() : Clock::time_point{};
++          const bool captured = rex_presenter->CaptureGuestOutput(image);
++          if (measure) {
++            capture_cpu_ms += std::chrono::duration<double, std::milli>(
++                Clock::now() - capture_start).count();
++            ++timing_attempts;
++          }
++          if (captured) {
++            if (image.width > 0 && image.height > 0 &&
++                image.stride >= size_t(image.width) * 4 &&
++                image.data.size() >= size_t(image.width) * 4 &&
++                image.height - 1 <=
++                    (image.data.size() - size_t(image.width) * 4) / image.stride) {
++              capture_ok_count++;
++              if (capture_ok_count == 1 || capture_ok_count == 60 ||
++                  capture_ok_count == 300) {
++                size_t nonblack_pixels = 0;
++                for (uint32_t y = 0; y < image.height; ++y) {
++                  const auto* row = image.data.data() + y * image.stride;
++                  for (uint32_t x = 0; x < image.width; ++x) {
++                    if (row[x * 4] || row[x * 4 + 1] || row[x * 4 + 2])
++                      ++nonblack_pixels;
++                  }
++                }
++                REXLOG_INFO("NativePresenter: capture={} image={}x{} stride={} "
++                            "bytes={} nonblack_rgb_pixels={}",
++                            capture_ok_count, image.width, image.height,
++                            image.stride, image.data.size(), nonblack_pixels);
++              }
++              computeLetterbox(device, image.display_aspect_ratio_x,
++                                image.display_aspect_ratio_y);
++              NativePresentTimings timings;
++              if (measure) ++timing_captures;
++              if (!device.presentImage(image.width, image.height, image.data.data(),
++                                       image.stride, sync_interval,
++                                       measure ? &timings : nullptr)) {
++                REXLOG_ERROR("NativePresenter: blit failed; stopping native presentation");
++                break;
++              }
++              if (measure) {
++                ++timing_presented;
++                upload_draw_cpu_ms += timings.upload_draw_cpu_ms;
++                present_cpu_ms += timings.present_cpu_ms;
++              }
++            } else {
++              empty_image_count++;
++              if (empty_image_count == 1) {
++                REXLOG_WARN("NativePresenter: CaptureGuestOutput returned an invalid "
++                            "image ({}x{}, stride={}, data_size={})",
++                            image.width, image.height, image.stride, image.data.size());
++              }
++            }
++          } else {
++            capture_fail_count++;
++            device.beginFrame();
++            device.clear(0.0f, 0.0f, 0.0f, 1.0f);
++            device.present(rex::cvar::Query<bool>("d3d12_host_vsync") ? 1 : 0);
++          }
++        }
++
++        if (log_counter == 0 || log_counter == 59 || log_counter == 299) {
++          REXLOG_INFO("NativePresenter: frame={} interop_ok={} interop_fail={} "
++                      "capture_ok={} capture_fail={} empty_img={} mode={}",
++                      current_count, interop_ok_count, interop_fail_count,
++                      capture_ok_count, capture_fail_count, empty_image_count,
++                      (gpu_interop_active && !gpu_interop_failed) ? "gpu" : "cpu");
++        }
++        log_counter++;
++      } else {
++        std::this_thread::sleep_for(std::chrono::milliseconds(1));
++      }
++      if (measure) {
++        const auto now = Clock::now();
++        const double seconds = std::chrono::duration<double>(now - timing_start).count();
++        if (seconds >= 5.0) {
++          const uint64_t guest_now = rex_presenter->guest_frame_count();
++          const uint64_t guest_delta = guest_now - timing_guest_start;
++          const uint64_t skipped = guest_delta > timing_captures
++              ? guest_delta - timing_captures : 0;
++          REXLOG_INFO("NativePresenter: timing window={} seconds={:.3f} "
++                      "guest_fps={:.2f} capture_fps={:.2f} submit_fps={:.2f} "
++                      "guest_not_captured={} capture_cpu_ms={:.3f} "
++                      "upload_draw_cpu_ms={:.3f} present_cpu_ms={:.3f} "
++                      "host_sync_interval={} guest_vsync={} time_scalar={} "
++                      "mode={}",
++                      timing_windows + 1, seconds, guest_delta / seconds,
++                      timing_captures / seconds, timing_presented / seconds, skipped,
++                      timing_attempts ? capture_cpu_ms / timing_attempts : 0.0,
++                      timing_presented ? upload_draw_cpu_ms / timing_presented : 0.0,
++                      timing_presented ? present_cpu_ms / timing_presented : 0.0,
++                      sync_interval, rex::cvar::Query<bool>("vsync"),
++                      rex::cvar::Query<double>("time_scalar"),
++                      (gpu_interop_active && !gpu_interop_failed) ? "gpu" : "cpu");
++          ++timing_windows;
++          timing_start = now;
++          timing_guest_start = guest_now;
++          timing_attempts = timing_captures = timing_presented = 0;
++          capture_cpu_ms = upload_draw_cpu_ms = present_cpu_ms = 0.0;
++        }
++      }
++    }
++
++    running.store(false);
++    REXLOG_INFO("NativePresenter: present thread stopped "
++                "(interop_ok={} interop_fail={} ok={} fail={} empty={})",
++                interop_ok_count, interop_fail_count,
++                capture_ok_count, capture_fail_count, empty_image_count);
++  }
++};
++
++NativePresenter::NativePresenter()
++    : impl_(std::make_unique<Impl>()) {}
++
++NativePresenter::~NativePresenter() {
++  shutdown();
++}
++
++bool NativePresenter::initialize(rex::ui::Presenter* rex_presenter,
++                                 rex::ui::Window* window,
++                                 uint32_t width, uint32_t height) {
++  shutdown();
++  if (!rex_presenter || !window) {
++    REXLOG_ERROR("NativePresenter: null presenter or window");
++    return false;
++  }
++
++  if (width == 0) width = 1280;
++  if (height == 0) height = 720;
++
++  impl_->rex_presenter = rex_presenter;
++  impl_->window = window;
++
++  void* hwnd = window->GetNativeWindowHandle();
++  if (!hwnd) {
++    REXLOG_ERROR("NativePresenter: window has no native handle");
++    shutdown();
++    return false;
++  }
++
++  window->SetPresenter(nullptr);
++  impl_->presenter_disconnected = true;
++  REXLOG_INFO("NativePresenter: D3D12 presenter disconnected from window");
++
++  if (!impl_->device.initialize(hwnd, width, height)) {
++    REXLOG_ERROR("NativePresenter: failed to initialize native device");
++    shutdown();
++    return false;
++  }
++
++  impl_->last_frame_count = 0;
++  impl_->stop_requested.store(false);
++  impl_->running.store(true);
++  impl_->present_thread = std::thread(&Impl::presentLoop, impl_.get());
++
++  REXLOG_INFO("NativePresenter: initialized ({}x{})", width, height);
++  return true;
++}
++
++void NativePresenter::shutdown() {
++  if (!impl_->rex_presenter) return;
++
++  impl_->stop();
++
++  impl_->device.shutdown();
++
++  if (impl_->presenter_disconnected && impl_->window) {
++    impl_->window->SetPresenter(impl_->rex_presenter);
++    impl_->presenter_disconnected = false;
++    REXLOG_INFO("NativePresenter: D3D12 presenter reconnected to window");
++  }
++
++  impl_->rex_presenter = nullptr;
++  impl_->window = nullptr;
++}
++
++bool NativePresenter::isInitialized() const {
++  return impl_ && impl_->running.load();
++}
++
++}
+diff --git a/src/native_renderer/native_presenter.h b/src/native_renderer/native_presenter.h
+new file mode 100644
+index 0000000..1a919a6
+--- /dev/null
++++ b/src/native_renderer/native_presenter.h
+@@ -0,0 +1,37 @@
++#pragma once
++
++#include <atomic>
++#include <cstdint>
++#include <memory>
++#include <thread>
++
++namespace rex {
++namespace ui {
++class Presenter;
++class Window;
++}
++}
++
++namespace dante {
++
++class NativePresenter {
++ public:
++  NativePresenter();
++  ~NativePresenter();
++
++  NativePresenter(const NativePresenter&) = delete;
++  NativePresenter& operator=(const NativePresenter&) = delete;
++
++  bool initialize(rex::ui::Presenter* rex_presenter, rex::ui::Window* window,
++                  uint32_t width, uint32_t height);
++
++  void shutdown();
++
++  bool isInitialized() const;
++
++ private:
++  struct Impl;
++  std::unique_ptr<Impl> impl_;
++};
++
++}
+diff --git a/src/native_renderer/native_renderer_integration.cpp b/src/native_renderer/native_renderer_integration.cpp
+new file mode 100644
+index 0000000..8edcc8c
+--- /dev/null
++++ b/src/native_renderer/native_renderer_integration.cpp
+@@ -0,0 +1,81 @@
++// native_renderer_integration.cpp - Integration with ReXGlue app
++//
++// Bridges the project-owned native renderer with the ReXGlue SDL window.
++// Gated behind the `native_renderer` cvar.
++//
++// Part of the DiligentCore migration (IMPL-DC-003).
++
++#include "native_renderer_integration.h"
++#include "native_device.h"
++
++#include <rex/cvar.h>
++#include <rex/logging/macros.h>
++
++#include <cmath>
++
++namespace dante {
++
++REXCVAR_DEFINE_BOOL(native_renderer, false, "Graphics",
++                    "Use native DiligentCore/Vulkan renderer instead of ReXGlue Xenos");
++
++struct NativeRendererIntegration::Impl {
++  NativeDevice device;
++  bool initialized = false;
++  float frame_time = 0.0f;
++};
++
++NativeRendererIntegration::NativeRendererIntegration()
++    : impl_(std::make_unique<Impl>()) {}
++
++NativeRendererIntegration::~NativeRendererIntegration() {
++  shutdown();
++}
++
++bool NativeRendererIntegration::initialize(void* hwnd, uint32_t width,
++                                            uint32_t height) {
++  if (impl_->initialized) return true;
++
++  if (!impl_->device.initialize(hwnd, width, height)) {
++    REXLOG_ERROR("NativeRendererIntegration: Failed to initialize native device");
++    return false;
++  }
++
++  impl_->initialized = true;
++  REXLOG_INFO("NativeRendererIntegration: Initialized ({}x{})", width, height);
++  return true;
++}
++
++void NativeRendererIntegration::onFrame() {
++  if (!impl_->initialized) return;
++  if (!REXCVAR_GET(native_renderer)) return;
++
++  impl_->frame_time += 0.02f;
++  float r = 0.1f + 0.05f * sinf(impl_->frame_time);
++  float g = 0.1f + 0.05f * sinf(impl_->frame_time + 2.094f);
++  float b = 0.15f + 0.05f * sinf(impl_->frame_time + 4.189f);
++
++  impl_->device.beginFrame();
++  impl_->device.clear(r, g, b, 1.0f);
++  impl_->device.present(1);
++}
++
++void NativeRendererIntegration::onResize(uint32_t width, uint32_t height) {
++  if (!impl_->initialized) return;
++  impl_->device.resize(width, height);
++}
++
++void NativeRendererIntegration::shutdown() {
++  if (!impl_->initialized) return;
++  impl_->device.shutdown();
++  impl_->initialized = false;
++}
++
++bool NativeRendererIntegration::isInitialized() const {
++  return impl_ && impl_->initialized;
++}
++
++bool NativeRendererIntegration::isActive() const {
++  return isInitialized() && REXCVAR_GET(native_renderer);
++}
++
++}  // namespace dante
+diff --git a/src/native_renderer/native_renderer_integration.h b/src/native_renderer/native_renderer_integration.h
+new file mode 100644
+index 0000000..5a1b597
+--- /dev/null
++++ b/src/native_renderer/native_renderer_integration.h
+@@ -0,0 +1,51 @@
++// native_renderer_integration.h - Integration of native renderer with ReXGlue app
++//
++// This module bridges the project-owned native renderer (DiligentCore/Vulkan)
++// with the ReXGlue application's SDL window. It is gated behind a cvar and
++// does not interfere with the existing ReXGlue Xenos renderer unless enabled.
++//
++// Part of the DiligentCore migration (IMPL-DC-003).
++// See: tools/research/dante_re/TRANSITION/DILIGENTCORE_MIGRATION_PLAN.md
++
++#pragma once
++
++#include <memory>
++
++namespace dante {
++
++// Integration controller for the native renderer within the ReXGlue app.
++// Created in OnPostSetup, destroyed in OnShutdown.
++class NativeRendererIntegration {
++ public:
++  NativeRendererIntegration();
++  ~NativeRendererIntegration();
++
++  // Initialize the native renderer using the app's window handle.
++  // hwnd: the ReXGlue SDL window's native HWND.
++  // width/height: current window pixel dimensions.
++  // Returns true on success.
++  bool initialize(void* hwnd, uint32_t width, uint32_t height);
++
++  // Called every frame from the UI thread. When the native renderer is
++  // enabled (via cvar), it renders a clear color to the window.
++  // When disabled, this is a no-op.
++  void onFrame();
++
++  // Called when the window is resized.
++  void onResize(uint32_t width, uint32_t height);
++
++  // Shut down and release all resources.
++  void shutdown();
++
++  // Check if the native renderer is initialized.
++  bool isInitialized() const;
++
++  // Check if the native renderer is currently active (enabled via cvar).
++  bool isActive() const;
++
++ private:
++  struct Impl;
++  std::unique_ptr<Impl> impl_;
++};
++
++}  // namespace dante
+diff --git a/src/native_renderer/native_renderer_test.cpp b/src/native_renderer/native_renderer_test.cpp
+new file mode 100644
+index 0000000..4abfd64
+--- /dev/null
++++ b/src/native_renderer/native_renderer_test.cpp
+@@ -0,0 +1,512 @@
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#include <windows.h>
++
++#include <cstdio>
++#include <cmath>
++#include <cstring>
++#include <vector>
++
++#include "native_device.h"
++
++static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam,
++                                   LPARAM lParam) {
++  switch (msg) {
++    case WM_DESTROY:
++      PostQuitMessage(0);
++      return 0;
++    case WM_KEYDOWN:
++      if (wParam == VK_ESCAPE) {
++        PostQuitMessage(0);
++      }
++      return 0;
++  }
++  return DefWindowProcA(hwnd, msg, wParam, lParam);
++}
++
++struct VertexTri {
++  float pos[2];
++  float color[3];
++};
++
++struct VertexQuad {
++  float pos[2];
++  float uv[2];
++};
++
++struct CameraCB {
++  float transform[16];
++};
++
++static const char* kVSTri = R"(
++cbuffer CameraCB {
++    float4x4 g_Transform;
++};
++struct VSInput {
++    float2 pos   : ATTRIB0;
++    float3 color : ATTRIB1;
++};
++struct VSOutput {
++    float4 pos   : SV_POSITION;
++    float3 color : COLOR;
++};
++void main(in VSInput In, out VSOutput Out) {
++    Out.pos = mul(g_Transform, float4(In.pos, 0.0, 1.0));
++    Out.color = In.color;
++}
++)";
++
++static const char* kPSTri = R"(
++struct PSInput {
++    float4 pos   : SV_POSITION;
++    float3 color : COLOR;
++};
++struct PSOutput {
++    float4 color : SV_TARGET0;
++};
++void main(in PSInput In, out PSOutput Out) {
++    Out.color = float4(In.color, 1.0);
++}
++)";
++
++static const char* kVSQuad = R"(
++cbuffer CameraCB {
++    float4x4 g_Transform;
++};
++struct VSInput {
++    float2 pos : ATTRIB0;
++    float2 uv  : ATTRIB1;
++};
++struct VSOutput {
++    float4 pos : SV_POSITION;
++    float2 uv  : TEXCOORD0;
++};
++void main(in VSInput In, out VSOutput Out) {
++    Out.pos = mul(g_Transform, float4(In.pos, 0.0, 1.0));
++    Out.uv = In.uv;
++}
++)";
++
++static const char* kPSQuad = R"(
++Texture2D g_Texture;
++SamplerState g_Sampler;
++struct PSInput {
++    float4 pos : SV_POSITION;
++    float2 uv  : TEXCOORD0;
++};
++struct PSOutput {
++    float4 color : SV_TARGET0;
++};
++void main(in PSInput In, out PSOutput Out) {
++    Out.color = g_Texture.Sample(g_Sampler, In.uv);
++}
++)";
++
++static void buildTransformMatrix(float angle, float scale, float tx, float ty,
++                                 float* out) {
++  float c = cosf(angle) * scale;
++  float s = sinf(angle) * scale;
++  out[0] = c;  out[1] = s;  out[2] = 0; out[3] = 0;
++  out[4] = -s; out[5] = c;  out[6] = 0; out[7] = 0;
++  out[8] = 0;  out[9] = 0;  out[10] = 1; out[11] = 0;
++  out[12] = tx; out[13] = ty; out[14] = 0; out[15] = 1;
++}
++
++static void genCheckerboard(uint32_t* pixels, uint32_t w, uint32_t h) {
++  for (uint32_t y = 0; y < h; y++) {
++    for (uint32_t x = 0; x < w; x++) {
++      bool checker = ((x / 8) + (y / 8)) % 2 == 0;
++      if (checker) {
++        pixels[y * w + x] = 0xFF'FF'FF'FF;
++      } else {
++        uint8_t r = static_cast<uint8_t>(x * 4);
++        uint8_t g = static_cast<uint8_t>(y * 4);
++        pixels[y * w + x] = 0xFF000000u | (r) | (g << 8);
++      }
++    }
++  }
++}
++
++static bool runBlitTest(dante::NativeDevice& device, HWND hwnd) {
++  SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
++               SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
++  for (uint32_t phase = 0; phase < 3; ++phase) {
++    const uint32_t w = phase == 1 ? 97 : 64;
++    const uint32_t h = phase == 1 ? 53 : 48;
++    const size_t stride = w * 4 + 28;
++    const uint32_t colors[3][4] = {
++        {0xFF0000FF, 0xFF00FF00, 0xFFFF0000, 0xFFFFFFFF},
++        {0xFF808080, 0xFFC08040, 0xFF204060, 0xFF101010},
++        {0xFF404040, 0xFF4080C0, 0xFF604020, 0xFFB0B0B0}};
++    std::vector<uint8_t> pixels(stride * h, 0x7F);
++    for (uint32_t y = 0; y < h; ++y) {
++      for (uint32_t x = 0; x < w; ++x) {
++        const uint32_t color = colors[phase][(y >= h / 2) * 2 + (x >= w / 2)];
++        std::memcpy(pixels.data() + y * stride + x * 4, &color, 4);
++      }
++    }
++    for (uint32_t frame = 0; frame < 60; ++frame) {
++      MSG msg;
++      while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
++        if (msg.message == WM_QUIT) return false;
++        TranslateMessage(&msg);
++        DispatchMessageA(&msg);
++      }
++      if (!device.presentImage(w, h, pixels.data(), stride, 1)) return false;
++    }
++    Sleep(100);
++    RECT client;
++    GetClientRect(hwnd, &client);
++    HDC dc = GetDC(nullptr);
++    bool passed = true;
++    for (uint32_t quadrant = 0; quadrant < 4; ++quadrant) {
++      POINT point{client.right * (quadrant % 2 ? 3 : 1) / 4,
++                  client.bottom * (quadrant / 2 ? 3 : 1) / 4};
++      ClientToScreen(hwnd, &point);
++      COLORREF actual = GetPixel(dc, point.x, point.y);
++      COLORREF expected = colors[phase][quadrant] & 0xFFFFFF;
++      bool owned = WindowFromPoint(point) == hwnd;
++      printf("Blit phase=%u image=%ux%u stride=%zu quadrant=%u owned=%d "
++             "actual=%06lx expected=%06lx\n", phase, w, h, stride,
++             quadrant, owned, actual, expected);
++      passed = passed && owned && actual == expected;
++    }
++    ReleaseDC(nullptr, dc);
++    if (!passed) return false;
++  }
++  return true;
++}
++
++static bool runAspectBlitTest(dante::NativeDevice& device, HWND hwnd) {
++  const uint32_t aspects[][2] = {{16, 9}, {21, 9}, {4, 3}, {16, 10}};
++  const uint32_t windows[][2] = {{960, 540}, {1260, 540}, {720, 540}, {864, 540}};
++  const uint32_t colors[] = {0xFF808080, 0xFFC08040, 0xFF204060, 0xFFB0B0B0};
++  uint32_t case_index = 0;
++  for (uint32_t scale : {1u, 3u}) {
++    const uint32_t src_w = 1280 * scale;
++    const uint32_t src_h = 720 * scale;
++    const size_t stride = src_w * 4 + 28;
++    std::vector<uint8_t> source(stride * src_h, 0x7F);
++    for (uint32_t y = 0; y < src_h; ++y) {
++      for (uint32_t x = 0; x < src_w; ++x) {
++        const uint32_t color = colors[(y >= src_h / 2) * 2 + (x >= src_w / 2)];
++        std::memcpy(source.data() + y * stride + x * 4, &color, 4);
++      }
++    }
++    for (const auto& aspect : aspects) {
++      for (const auto& window : windows) {
++        for (bool letterbox : {true, false}) {
++          RECT outer{0, 0, LONG(window[0]), LONG(window[1])};
++          AdjustWindowRect(&outer, WS_OVERLAPPEDWINDOW, FALSE);
++          SetWindowPos(hwnd, HWND_TOPMOST, 40, 40,
++                       outer.right - outer.left, outer.bottom - outer.top,
++                       SWP_SHOWWINDOW);
++          device.setDisplayAspect(double(aspect[0]) / aspect[1], letterbox);
++          for (uint32_t frame = 0; frame < 8; ++frame) {
++            MSG msg;
++            while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
++              if (msg.message == WM_QUIT) return false;
++              TranslateMessage(&msg);
++              DispatchMessageA(&msg);
++            }
++            if (!device.updateWindowSize() ||
++                !device.presentImage(src_w, src_h, source.data(), stride, 1)) return false;
++          }
++          Sleep(100);
++          const auto desc = device.swapchainDesc();
++          if (desc.Width != window[0] || desc.Height != window[1]) return false;
++          uint32_t width = window[0], height = window[1];
++          if (letterbox) {
++            if (uint64_t(width) * aspect[1] > uint64_t(height) * aspect[0]) {
++              width = (uint64_t(height) * aspect[0] + aspect[1] / 2) / aspect[1];
++            } else {
++              height = (uint64_t(width) * aspect[1] + aspect[0] / 2) / aspect[0];
++            }
++          }
++          const uint32_t left = (window[0] - width) / 2;
++          const uint32_t top = (window[1] - height) / 2;
++          POINT origin{};
++          ClientToScreen(hwnd, &origin);
++          for (uint32_t y = 8; y < window[1] - 8; y += 16) {
++            for (uint32_t x = 8; x < window[0] - 8; x += 16) {
++              if (WindowFromPoint(POINT{origin.x + LONG(x), origin.y + LONG(y)}) != hwnd) {
++                printf("Aspect test occluded at %u,%u\n", x, y);
++                return false;
++              }
++            }
++          }
++          HDC screen = GetDC(nullptr);
++          HDC memory = CreateCompatibleDC(screen);
++          BITMAPINFO info{};
++          info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
++          info.bmiHeader.biWidth = LONG(window[0]);
++          info.bmiHeader.biHeight = -LONG(window[1]);
++          info.bmiHeader.biPlanes = 1;
++          info.bmiHeader.biBitCount = 32;
++          info.bmiHeader.biCompression = BI_RGB;
++          void* pixels = nullptr;
++          HBITMAP bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
++          HGDIOBJ old = SelectObject(memory, bitmap);
++          const bool captured = BitBlt(memory, 0, 0, window[0], window[1], screen,
++                                      origin.x, origin.y, SRCCOPY) && GdiFlush();
++          uint64_t bad_bars = 0, bad_interior = 0, bars = 0, interior = 0;
++          if (captured) {
++            for (uint32_t y = 8; y < window[1] - 8; ++y) {
++              for (uint32_t x = 8; x < window[0] - 8; ++x) {
++                const uint32_t bgra = static_cast<const uint32_t*>(pixels)[y * window[0] + x];
++                const uint32_t actual = ((bgra & 0xFF) << 16) | (bgra & 0xFF00) |
++                                        ((bgra >> 16) & 0xFF);
++                if (x < left || x >= left + width || y < top || y >= top + height) {
++                  ++bars;
++                  bad_bars += actual != 0;
++                } else {
++                  const int32_t dx = int32_t((x - left) * 2) - int32_t(width);
++                  const int32_t dy = int32_t((y - top) * 2) - int32_t(height);
++                  if (std::abs(dx) < 8 || std::abs(dy) < 8) continue;
++                  const uint32_t expected = colors[(dy >= 0) * 2 + (dx >= 0)] & 0xFFFFFF;
++                  ++interior;
++                  bad_interior += actual != expected;
++                }
++              }
++            }
++            if ((scale == 3 && letterbox && window[0] == 1260) ||
++                (scale == 1 && window[0] == 720 && !letterbox) || bad_bars || bad_interior) {
++              char temp[MAX_PATH];
++              char path[MAX_PATH];
++              GetTempPathA(MAX_PATH, temp);
++              std::snprintf(path, sizeof(path), "%sdante_blit_%lu_case%u.bmp",
++                            temp, GetCurrentProcessId(), case_index);
++              FILE* file = std::fopen(path, "wb");
++              if (file) {
++                BITMAPFILEHEADER header{};
++                header.bfType = 0x4D42;
++                header.bfOffBits = sizeof(header) + sizeof(BITMAPINFOHEADER);
++                header.bfSize = header.bfOffBits + window[0] * window[1] * 4;
++                std::fwrite(&header, sizeof(header), 1, file);
++                std::fwrite(&info.bmiHeader, sizeof(BITMAPINFOHEADER), 1, file);
++                std::fwrite(pixels, window[0] * window[1] * 4, 1, file);
++                std::fclose(file);
++                printf("Aspect screenshot: %s\n", path);
++              }
++            }
++          }
++          SelectObject(memory, old);
++          DeleteObject(bitmap);
++          DeleteDC(memory);
++          ReleaseDC(nullptr, screen);
++          printf("Aspect case=%u scale=%u source=%ux%u display=%u:%u window=%ux%u "
++                 "letterbox=%d rect=%u,%u,%u,%u bars=%llu bad_bars=%llu "
++                 "interior=%llu bad_interior=%llu captured=%d\n",
++                 case_index++, scale, src_w, src_h, aspect[0], aspect[1], window[0], window[1],
++                 letterbox, left, top, width, height, bars, bad_bars, interior, bad_interior, captured);
++          if (!captured || bad_bars || bad_interior || !interior) return false;
++        }
++      }
++    }
++  }
++  ShowWindow(hwnd, SW_MINIMIZE);
++  Sleep(100);
++  if (device.updateWindowSize()) return false;
++  ShowWindow(hwnd, SW_RESTORE);
++  Sleep(100);
++  if (!device.updateWindowSize()) return false;
++  const uint32_t pixel = 0xFF808080;
++  device.setDisplayAspect(16.0 / 9.0, false);
++  if (!device.presentImage(1, 1, &pixel, 4, 1)) return false;
++  if (device.presentImageShared(reinterpret_cast<void*>(1), 1280, 720, 0)) return false;
++  printf("Aspect blit cases=%u minimize/restore and interop invalid-handle rejection passed\n", case_index);
++  return true;
++}
++
++int main(int argc, char** argv) {
++  SetProcessDPIAware();
++  const char* class_name = "DanteNativeRendererTest";
++  const uint32_t width = 1280;
++  const uint32_t height = 720;
++
++  WNDCLASSEXA wc = {};
++  wc.cbSize = sizeof(WNDCLASSEXA);
++  wc.lpfnWndProc = WindowProc;
++  wc.hInstance = GetModuleHandleA(nullptr);
++  wc.lpszClassName = class_name;
++  wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
++
++  if (!RegisterClassExA(&wc)) {
++    fprintf(stderr, "Failed to register window class\n");
++    return 1;
++  }
++
++  RECT rc = {0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
++  AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
++
++  HWND hwnd = CreateWindowExA(0, class_name,
++                              "Dante Native Renderer Test - UBO + Texture",
++                              WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
++                              rc.right - rc.left, rc.bottom - rc.top,
++                              nullptr, nullptr, wc.hInstance, nullptr);
++  if (!hwnd) {
++    fprintf(stderr, "Failed to create window\n");
++    return 1;
++  }
++
++  ShowWindow(hwnd, SW_SHOW);
++  UpdateWindow(hwnd);
++
++  dante::NativeDevice device;
++  if (!device.initialize(hwnd, width, height)) {
++    fprintf(stderr, "Failed to initialize native device\n");
++    DestroyWindow(hwnd);
++    return 1;
++  }
++
++  if (argc > 1 && std::strcmp(argv[1], "--blit-test") == 0) {
++    const bool passed = runBlitTest(device, hwnd) && runAspectBlitTest(device, hwnd);
++    device.shutdown();
++    DestroyWindow(hwnd);
++    UnregisterClassA(class_name, wc.hInstance);
++    printf("Blit regression test %s\n", passed ? "passed" : "failed");
++    return passed ? 0 : 1;
++  }
++
++  VertexTri tri_vertices[] = {
++    {{ 0.0f,  0.5f}, {1.0f, 0.0f, 0.0f}},
++    {{-0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
++    {{ 0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}},
++  };
++
++  dante::BufferDesc vb_tri_desc;
++  vb_tri_desc.size_bytes = sizeof(tri_vertices);
++  dante::NativeBuffer* vb_tri = device.createBuffer(vb_tri_desc, tri_vertices);
++
++  VertexQuad quad_vertices[] = {
++    {{-0.7f,  0.2f}, {0.0f, 0.0f}},
++    {{-0.7f, -0.2f}, {0.0f, 1.0f}},
++    {{-0.3f,  0.2f}, {1.0f, 0.0f}},
++    {{-0.3f, -0.2f}, {1.0f, 1.0f}},
++  };
++
++  dante::BufferDesc vb_quad_desc;
++  vb_quad_desc.size_bytes = sizeof(quad_vertices);
++  dante::NativeBuffer* vb_quad = device.createBuffer(vb_quad_desc, quad_vertices);
++
++  dante::NativeBuffer* ubo = device.createUniformBuffer(sizeof(CameraCB));
++
++  const uint32_t tex_w = 64, tex_h = 64;
++  uint32_t* tex_pixels = new uint32_t[tex_w * tex_h];
++  genCheckerboard(tex_pixels, tex_w, tex_h);
++
++  dante::TextureDesc tex_desc;
++  tex_desc.width = tex_w;
++  tex_desc.height = tex_h;
++  tex_desc.format = dante::TextureFormat::RGBA8_UNorm;
++  tex_desc.initial_data = tex_pixels;
++  tex_desc.data_size = tex_w * tex_h * 4;
++  dante::NativeTexture* texture = device.createTexture(tex_desc);
++  delete[] tex_pixels;
++
++  dante::VertexElement tri_elems[] = {
++    {dante::VertexSemantic::Position, dante::VertexFormat::Float32x2, 0, 0},
++    {dante::VertexSemantic::Color,    dante::VertexFormat::Float32x3, 8, 0},
++  };
++
++  dante::PipelineDesc tri_pipe_desc;
++  tri_pipe_desc.vertex_elements = tri_elems;
++  tri_pipe_desc.vertex_element_count = 2;
++  tri_pipe_desc.topology = dante::PrimitiveTopology::TriangleList;
++  tri_pipe_desc.vertex_shader_source = kVSTri;
++  tri_pipe_desc.pixel_shader_source = kPSTri;
++  tri_pipe_desc.uniform_bindings = nullptr;
++  tri_pipe_desc.uniform_binding_count = 0;
++
++  dante::NativePipeline* tri_pipeline = device.createPipeline(tri_pipe_desc);
++
++  dante::VertexElement quad_elems[] = {
++    {dante::VertexSemantic::Position, dante::VertexFormat::Float32x2, 0, 0},
++    {dante::VertexSemantic::TexCoord0, dante::VertexFormat::Float32x2, 8, 0},
++  };
++
++  dante::PipelineDesc quad_pipe_desc;
++  quad_pipe_desc.vertex_elements = quad_elems;
++  quad_pipe_desc.vertex_element_count = 2;
++  quad_pipe_desc.topology = dante::PrimitiveTopology::TriangleStrip;
++  quad_pipe_desc.vertex_shader_source = kVSQuad;
++  quad_pipe_desc.pixel_shader_source = kPSQuad;
++  quad_pipe_desc.uniform_bindings = nullptr;
++  quad_pipe_desc.uniform_binding_count = 0;
++
++  dante::NativePipeline* quad_pipeline = device.createPipeline(quad_pipe_desc);
++
++  if (!vb_tri || !vb_quad || !ubo || !texture || !tri_pipeline || !quad_pipeline) {
++    fprintf(stderr, "Failed to create resources\n");
++    device.shutdown();
++    DestroyWindow(hwnd);
++    return 1;
++  }
++
++  device.bindPipeline(tri_pipeline);
++  device.bindUniformBuffer(0, 0, ubo);
++
++  device.bindPipeline(quad_pipeline);
++  device.bindUniformBuffer(0, 0, ubo);
++  device.bindTexture(1, 0, texture);
++
++  printf("Native renderer test running.\n");
++  printf("  Left: textured quad (checkerboard)\n");
++  printf("  Right: rotating colored triangle (UBO transform)\n");
++  printf("Press ESC to exit.\n");
++
++  float t = 0.0f;
++  bool running = true;
++  while (running) {
++    MSG msg;
++    while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
++      if (msg.message == WM_QUIT) {
++        running = false;
++      }
++      TranslateMessage(&msg);
++      DispatchMessageA(&msg);
++    }
++    if (!running) break;
++
++    t += 0.02f;
++
++    CameraCB cb;
++    buildTransformMatrix(t, 0.8f, 0.5f, 0.0f, cb.transform);
++    device.updateUniformBuffer(ubo, &cb, sizeof(cb));
++
++    device.beginFrame();
++    device.clear(0.05f, 0.05f, 0.08f, 1.0f);
++
++    device.bindPipeline(quad_pipeline);
++    CameraCB quad_cb;
++    buildTransformMatrix(0.0f, 1.0f, 0.0f, 0.0f, quad_cb.transform);
++    device.updateUniformBuffer(ubo, &quad_cb, sizeof(quad_cb));
++    device.bindVertexBuffer(0, vb_quad, sizeof(VertexQuad));
++    device.draw(4);
++
++    device.bindPipeline(tri_pipeline);
++    buildTransformMatrix(t, 0.8f, 0.5f, 0.0f, cb.transform);
++    device.updateUniformBuffer(ubo, &cb, sizeof(cb));
++    device.bindVertexBuffer(0, vb_tri, sizeof(VertexTri));
++    device.draw(3);
++
++    device.present(1);
++  }
++
++  device.destroyPipeline(tri_pipeline);
++  device.destroyPipeline(quad_pipeline);
++  device.destroyTexture(texture);
++  device.destroyBuffer(ubo);
++  device.destroyBuffer(vb_quad);
++  device.destroyBuffer(vb_tri);
++  device.shutdown();
++  DestroyWindow(hwnd);
++  UnregisterClassA(class_name, wc.hInstance);
++
++  printf("Native renderer test complete.\n");
++  return 0;
++}

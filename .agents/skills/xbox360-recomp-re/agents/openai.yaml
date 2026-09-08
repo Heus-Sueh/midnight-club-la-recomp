@@ -1,0 +1,4 @@
+interface:
+  display_name: "Xbox 360 Recomp RE"
+  short_description: "Investigate XEX code and ReXGlue hooks"
+  default_prompt: "Use $xbox360-recomp-re to investigate an Xbox 360 binary issue and plan an evidence-based hook."

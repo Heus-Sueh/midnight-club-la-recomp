@@ -1,0 +1,123 @@
+# Manual function-entry hints discovered by the first ReXGlue analysis pass.
+# Keep these overrides separate from the generated manifest so they can be
+# reviewed and refined as reverse engineering identifies real symbol names.
+# Compatible default.xex SHA-256:
+# c386f4001fa569e6ad4b982f441f67412f00b3f47c166134555cd4b59854a432
+
+[functions."0x8220BF08"]
+name = "sub_8220BF08"
+
+[functions."0x8220C018"]
+name = "sub_8220C018"
+
+[functions."0x822B88C8"]
+name = "sub_822B88C8"
+
+# Direct tail-call target used by the complete thunk at 0x822C9DC8. Runtime
+# memory confirms a normal PPC function prologue/body beginning at this address.
+[functions."0x822C9828"]
+name = "sub_822C9828"
+
+[functions."0x822C98B8"]
+name = "sub_822C98B8"
+
+[functions."0x822C9948"]
+name = "sub_822C9948"
+
+# Consecutive dispatch thunks recovered from the bytes between the discovered
+# functions at 0x822C9DB8 and 0x822C9DE8. The runtime reached 0x822C9DD8;
+# 0x822C9DC8 has the same complete lis/mr/addi/b thunk shape immediately before
+# it and is kept as a distinct entry rather than folded into its predecessor.
+[functions."0x822C9DC8"]
+name = "sub_822C9DC8"
+
+[functions."0x822C9DD8"]
+name = "sub_822C9DD8"
+
+[functions."0x823F32E8"]
+name = "sub_823F32E8"
+
+[functions."0x823FD718"]
+name = "sub_823FD718"
+
+# Runtime-reached secondary entry after the terminal branch in sub_823F3C60.
+[functions."0x823F3C68"]
+name = "sub_823F3C68"
+
+# Runtime-reached method entry after the terminal bctr in sub_823F6EB0; it
+# prepares state that joins the already discovered shared tail at 0x823F6F1C.
+[functions."0x823F6EF8"]
+name = "sub_823F6EF8"
+
+[functions."0x824B0DE8"]
+name = "sub_824B0DE8"
+
+# Runtime vtable target. This aligned entry begins after the terminal bctr in
+# sub_8249CBE0 and before the next discovered function at 0x8249CC20.
+[functions."0x8249CBF0"]
+name = "sub_8249CBF0"
+
+# Consecutive 16-byte vtable dispatch stubs in the same bounded gap. CC00 was
+# reached at runtime; CC10 is the final aligned entry before 0x8249CC20.
+[functions."0x8249CC00"]
+name = "sub_8249CC00"
+
+[functions."0x8249CC10"]
+name = "sub_8249CC10"
+
+# Consecutive 32-byte dispatch thunks in the bounded gap between sub_82554040
+# and sub_825540A0. 0x82554080 was reached at runtime via bctrl in sub_82554E20
+# (guest LR 0x82555CCC); 0x82554060 has the same lis/lwz/mtctr/bctr thunk shape
+# immediately before it.
+[functions."0x82554060"]
+name = "sub_82554060"
+
+[functions."0x82554080"]
+name = "sub_82554080"
+
+# Runtime-discovered entry in the initializer table walked by sub_82132740.
+# The first host smoke test reached it through bctrl at guest LR 0x821327F8.
+[functions."0x827A7FD0"]
+name = "sub_827A7FD0"
+
+# Remaining entries from the same initializer table, captured from guest
+# memory and cross-checked against the generated function registry.
+[functions."0x827A8220"]
+name = "sub_827A8220"
+
+[functions."0x827AD168"]
+name = "sub_827AD168"
+
+[functions."0x827AFC78"]
+name = "sub_827AFC78"
+
+[functions."0x827B0538"]
+name = "sub_827B0538"
+
+[functions."0x827B0558"]
+name = "sub_827B0558"
+
+[functions."0x827B0578"]
+name = "sub_827B0578"
+
+[functions."0x827B0598"]
+name = "sub_827B0598"
+
+[functions."0x827B1048"]
+name = "sub_827B1048"
+
+[functions."0x827B1068"]
+name = "sub_827B1068"
+
+[functions."0x827B4B58"]
+name = "sub_827B4B58"
+
+[functions."0x827B4B78"]
+name = "sub_827B4B78"
+
+# Native Frame Presentation Hook (RAGE grcDevice::Present): At 0x8241a0e4
+# Intercepts the swap boundary right before VdSwap for telemetry and optional
+# host pacing without modifying the guest simulation.
+[[midasm_hook]]
+address = 0x8241a0e4
+name = "mcla_native_present_hook"

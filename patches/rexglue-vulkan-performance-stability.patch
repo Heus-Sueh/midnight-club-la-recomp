@@ -1,0 +1,70 @@
+diff --git a/include/rex/perf/counter.h b/include/rex/perf/counter.h
+index b3947e0..092b0fe 100644
+--- a/include/rex/perf/counter.h
++++ b/include/rex/perf/counter.h
+@@ -13,6 +13,10 @@
+ #include <cstdint>
+ #include <string>
+ 
++#include <rex/cvar.h>
++
++REXCVAR_DECLARE(std::string, perf_log_csv);
++
+ #ifdef REXGLUE_ENABLE_PROFILING
+ #include <tracy/Tracy.hpp>
+ #endif
+diff --git a/src/graphics/util/draw.cpp b/src/graphics/util/draw.cpp
+index 305380e..9663667 100644
+--- a/src/graphics/util/draw.cpp
++++ b/src/graphics/util/draw.cpp
+@@ -882,10 +882,14 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
+     y1 = y0 + int32_t(xenos::kMaxResolveSize);
+   }
+ 
+-  assert_true(x0 < x1 && y0 < y1);
++  // An entirely clipped resolve has no pixels to copy or clear. Report an
++  // empty extent so backend callers can treat it as a successful no-op; a
++  // hard failure here aborts otherwise valid PM4 draws in games that emit
++  // tile/scissor combinations with no overlap.
+   if (x0 >= x1 || y0 >= y1) {
+-    REXGPU_ERROR("Resolve region is empty");
+-    return false;
++    info_out.coordinate_info.width_div_8 = 0;
++    info_out.height_div_8 = 0;
++    return true;
+   }
+ 
+   info_out.coordinate_info.width_div_8 = uint32_t(x1 - x0) >> xenos::kResolveAlignmentPixelsLog2;
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+index 91ac08f..e8a8c4f 100644
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -767,6 +767,11 @@ void VulkanPipelineCache::EndSubmission() {
+     }
+     if (startup_loading) {
+       creation_request_cond_.notify_one();
++    } else if (REXCVAR_GET(async_shader_compilation)) {
++      // Placeholder pipelines make it safe to submit the current frame while
++      // the real pipelines are built. Waiting here would turn every cache miss
++      // back into a synchronous frame-boundary stall and defeat async mode.
++      creation_request_cond_.notify_all();
+     } else {
+       // Help worker threads on the processor thread to reduce warm-up latency.
+       CreateQueuedPipelinesOnProcessorThread();
+diff --git a/src/system/runtime.cpp b/src/system/runtime.cpp
+index c10694c..81d5e87 100644
+--- a/src/system/runtime.cpp
++++ b/src/system/runtime.cpp
+@@ -95,6 +95,12 @@ X_STATUS Runtime::Setup(RuntimeConfig config) {
+   }
+   instance_ = this;
+ 
++  // Configuration and command-line flags have been resolved before runtime
++  // setup. Start counters here so CSV capture is active before the first GPU
++  // frame, and make repeated setup after a clean shutdown deterministic.
++  rex::perf::Init();
++  rex::perf::SetCsvLogPath(REXCVAR_GET(perf_log_csv));
++
+   auto fail = [this](X_STATUS status, std::string_view reason) {
+     REXSYS_ERROR("Runtime::Setup failed: {}", reason);
+     Shutdown();
