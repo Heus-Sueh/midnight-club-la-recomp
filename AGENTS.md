@@ -6,6 +6,10 @@ This repository is for a native static recompilation of **Midnight Club: Los Ang
 
 The project ships no retail game data. Users must supply files from their own legally obtained Xbox 360 copy. Never commit, upload, log, or distribute XEX/XEXP files, title updates, DLC, keys, extracted assets, decompiler databases, or other copyrighted game content.
 
+All tracked project content must be written in English, including documentation,
+skills, code comments, configuration comments, diagnostics, test names, and
+commit messages. Upstream reference snapshots may retain their original text.
+
 ## Non-negotiable architecture
 
 - Hosts: Windows x86_64 and Linux x86_64.
