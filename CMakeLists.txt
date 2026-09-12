@@ -7,6 +7,8 @@ project(midnight_club_la LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+option(MCLA_ENABLE_HOTSPOT_PROBE
+    "Instrument selected guest functions for performance investigation" OFF)
 
 include(generated/rexglue.cmake)
 
@@ -17,6 +19,10 @@ set(MIDNIGHTCLUBLA_SOURCES
     src/native_renderer/camera_interpolator.cpp
 )
 
+if(MCLA_ENABLE_HOTSPOT_PROBE)
+    list(APPEND MIDNIGHTCLUBLA_SOURCES src/hotspot_probe.cpp)
+endif()
+
 if(WIN32)
     add_executable(midnight_club_la WIN32 ${MIDNIGHTCLUBLA_SOURCES})
 else()
@@ -24,8 +30,13 @@ else()
 endif()
 
 target_include_directories(midnight_club_la PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
+
+if(MCLA_ENABLE_HOTSPOT_PROBE)
+    target_compile_definitions(midnight_club_la PRIVATE MCLA_ENABLE_HOTSPOT_PROBE=1)
+endif()
 
 # ReXGlue v0.10.0 compiles rex_app.cpp into the host but does not propagate
 # Dear ImGui's include directory through rex::runtime. Keep this source-tree

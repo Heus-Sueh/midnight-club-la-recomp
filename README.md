@@ -58,6 +58,30 @@ The tool reports average FPS, median, p95/p99, maximum interval and hitch counts
 The current controlled baseline and its limitations are recorded in
 `docs/investigations/performance-baseline-2026-09-07.md`.
 
+For CPU/GPU correlation on Linux, capture and summarize procfs/sysfs counters:
+
+```sh
+python scripts/profile_linux_runtime.py --duration 120 \
+  --output /tmp/mcla-host.csv -- ./out/build/linux-amd64-release/midnight_club_la
+python scripts/analyze_runtime_profile.py /tmp/mcla-host.csv \
+  --warmup-seconds 25
+```
+
+The CSV includes process and hottest-thread CPU, page-fault rates, AMD GPU
+occupancy, VRAM, RSS, and thread identity. The current gameplay bottleneck
+investigation and GDB guest-thread sampling procedure are documented in
+`docs/investigations/gameplay-cpu-bottleneck-2026-09-12.md`.
+
+To build the diagnostic guest-hotspot wrappers described in that report:
+
+```sh
+cmake --preset linux-amd64-release -DMCLA_ENABLE_HOTSPOT_PROBE=ON
+cmake --build --preset linux-amd64-release --parallel
+```
+
+The option defaults to `OFF`; do not use an instrumented binary for FPS
+comparisons.
+
 ## Prerequisites
 
 - Git
@@ -74,6 +98,7 @@ git clone --branch v0.10.0 --depth 1 --recurse-submodules --shallow-submodules \
 git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-posix-shm-unlink.patch
 git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-vulkan-shader-dump.patch
 git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-vulkan-performance-stability.patch
+git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-texture-cache-profiling.patch
 ```
 
 ## Extract the game

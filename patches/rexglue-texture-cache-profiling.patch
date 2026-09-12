@@ -1,0 +1,124 @@
+diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
+index 76f5600..59f864a 100644
+--- a/src/graphics/pipeline/texture/cache.cpp
++++ b/src/graphics/pipeline/texture/cache.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <cstdint>
+ #include <utility>
+ 
+@@ -80,6 +81,9 @@ REXCVAR_DEFINE_INT32(resolution_scale, 1, "GPU",
+ REXCVAR_DEFINE_BOOL(pre_mask_resolve_l2_block, true, "GPU",
+                     "Pre-mask scaled resolve L2 blocks to the write range before iterating");
+ 
++REXCVAR_DEFINE_BOOL(texture_cache_profile, false, "GPU",
++                    "Log aggregate texture request and global-lock timings every five seconds");
++
+ // DEFINE_int32(
+ //     draw_resolution_scale_x, 1,
+ //     "Integer pixel width scale used for scaling the rendering resolution "
+@@ -127,6 +131,23 @@ REXCVAR_DEFINE_BOOL(pre_mask_resolve_l2_block, true, "GPU",
+ 
+ namespace rex::graphics {
+ 
++namespace {
++
++struct TextureCacheProfileStats {
++  std::chrono::steady_clock::time_point interval_start;
++  uint64_t request_count = 0;
++  uint64_t request_time_ns = 0;
++  uint64_t prepare_count = 0;
++  uint64_t pending_load_count = 0;
++  uint64_t pending_range_count = 0;
++  uint64_t global_lock_wait_ns = 0;
++  uint64_t global_lock_hold_ns = 0;
++};
++
++thread_local TextureCacheProfileStats texture_cache_profile_stats;
++
++}  // namespace
++
+ const TextureCache::LoadShaderInfo TextureCache::load_shader_info_[kLoadShaderCount] = {
+     // k8bpb
+     {3, 4, 1, 4},
+@@ -376,8 +397,15 @@ bool TextureCache::PrepareTextureLoad(Texture& texture, PendingTextureLoad& pend
+ 
+   bool base_outdated = false;
+   bool mips_outdated = false;
++  const bool profile = REXCVAR_GET(texture_cache_profile);
++  const auto lock_wait_start =
++      profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++  std::chrono::steady_clock::time_point lock_acquired;
+   {
+     auto global_lock = global_critical_region_.Acquire();
++    if (profile) {
++      lock_acquired = std::chrono::steady_clock::now();
++    }
+     if (outdated_mask & Texture::kOutdatedBitBase) {
+       base_outdated = texture.base_outdated(global_lock);
+     }
+@@ -385,6 +413,16 @@ bool TextureCache::PrepareTextureLoad(Texture& texture, PendingTextureLoad& pend
+       mips_outdated = texture.mips_outdated(global_lock);
+     }
+   }
++  if (profile) {
++    const auto lock_released = std::chrono::steady_clock::now();
++    auto& stats = texture_cache_profile_stats;
++    ++stats.prepare_count;
++    stats.global_lock_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                     lock_acquired - lock_wait_start)
++                                     .count();
++    stats.global_lock_hold_ns +=
++        std::chrono::duration_cast<std::chrono::nanoseconds>(lock_released - lock_acquired).count();
++  }
+   if (!base_outdated && !mips_outdated) {
+     return false;
+   }
+@@ -451,6 +489,9 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
+ }
+ 
+ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
++  const bool profile = REXCVAR_GET(texture_cache_profile);
++  const auto request_start =
++      profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+   const auto& regs = register_file();
+ 
+   if (texture_became_outdated_.exchange(false, std::memory_order_acquire)) {
+@@ -591,6 +632,34 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+   if (bindings_changed) {
+     UpdateTextureBindingsImpl(bindings_changed);
+   }
++
++  if (profile) {
++    const auto request_end = std::chrono::steady_clock::now();
++    auto& stats = texture_cache_profile_stats;
++    if (stats.interval_start.time_since_epoch().count() == 0) {
++      stats.interval_start = request_start;
++    }
++    ++stats.request_count;
++    stats.request_time_ns +=
++        std::chrono::duration_cast<std::chrono::nanoseconds>(request_end - request_start).count();
++    stats.pending_load_count += pending_texture_loads.size();
++    stats.pending_range_count += pending_shared_memory_ranges.size();
++
++    if (request_end - stats.interval_start >= std::chrono::seconds(5)) {
++      const double request_ms = double(stats.request_time_ns) / 1'000'000.0;
++      const double lock_wait_ms = double(stats.global_lock_wait_ns) / 1'000'000.0;
++      const double lock_hold_ms = double(stats.global_lock_hold_ns) / 1'000'000.0;
++      REXGPU_INFO(
++          "TextureCache profile: requests={} total_ms={:.3f} avg_us={:.3f} "
++          "prepare={} loads={} ranges={} lock_wait_ms={:.3f} lock_hold_ms={:.3f}",
++          stats.request_count, request_ms,
++          stats.request_count ? request_ms * 1000.0 / double(stats.request_count) : 0.0,
++          stats.prepare_count, stats.pending_load_count, stats.pending_range_count, lock_wait_ms,
++          lock_hold_ms);
++      stats = {};
++      stats.interval_start = request_end;
++    }
++  }
+ }
+ 
+ const char* TextureCache::TextureKey::GetLogDimensionName(xenos::DataDimension dimension) {

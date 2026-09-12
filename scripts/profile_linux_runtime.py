@@ -18,20 +18,28 @@ import sys
 import time
 
 
-def parse_proc_stat(text: str) -> tuple[int, int]:
-    """Return (utime + stime ticks, thread count) from /proc/PID/stat."""
+def parse_proc_stat(text: str) -> tuple[int, int, int, int]:
+    """Return CPU ticks, thread count, minor faults and major faults."""
     closing_paren = text.rfind(")")
     if closing_paren < 0:
         raise ValueError("invalid proc stat: missing command terminator")
     fields = text[closing_paren + 2 :].split()
     if len(fields) < 18:
         raise ValueError("invalid proc stat: too few fields")
-    return int(fields[11]) + int(fields[12]), int(fields[17])
+    return int(fields[11]) + int(fields[12]), int(fields[17]), int(fields[7]), int(fields[9])
 
 
-def read_proc_ticks(path: Path) -> int:
-    ticks, _ = parse_proc_stat(path.read_text(encoding="ascii"))
-    return ticks
+def read_thread_counters(pid: int) -> dict[int, tuple[int, int, int]]:
+    values: dict[int, tuple[int, int, int]] = {}
+    for stat_path in Path(f"/proc/{pid}/task").glob("*/stat"):
+        try:
+            ticks, _, minor_faults, major_faults = parse_proc_stat(
+                stat_path.read_text(encoding="ascii")
+            )
+            values[int(stat_path.parent.name)] = (ticks, minor_faults, major_faults)
+        except (FileNotFoundError, ProcessLookupError, ValueError):
+            continue
+    return values
 
 
 def read_rss_mib(pid: int) -> float:
@@ -72,16 +80,6 @@ def read_integer(path: Path | None) -> int | None:
         return int(path.read_text(encoding="ascii").strip())
     except (OSError, ValueError):
         return None
-
-
-def read_thread_ticks(pid: int) -> dict[int, int]:
-    values: dict[int, int] = {}
-    for stat_path in Path(f"/proc/{pid}/task").glob("*/stat"):
-        try:
-            values[int(stat_path.parent.name)] = read_proc_ticks(stat_path)
-        except (FileNotFoundError, ProcessLookupError, ValueError):
-            continue
-    return values
 
 
 def read_thread_name(pid: int, tid: int) -> str:
@@ -126,7 +124,9 @@ def main() -> int:
     started = time.monotonic()
     previous_time = started
     previous_process_ticks = 0
-    previous_thread_ticks: dict[int, int] = {}
+    previous_process_minor_faults = 0
+    previous_process_major_faults = 0
+    previous_thread_counters: dict[int, tuple[int, int, int]] = {}
     reached_duration = False
 
     try:
@@ -139,6 +139,10 @@ def main() -> int:
                     "hottest_thread_percent",
                     "hottest_thread_tid",
                     "hottest_thread_name",
+                    "process_minor_faults_per_s",
+                    "process_major_faults_per_s",
+                    "hottest_thread_minor_faults_per_s",
+                    "hottest_thread_major_faults_per_s",
                     "top_threads",
                     "gpu_busy_percent",
                     "vram_used_mib",
@@ -150,10 +154,14 @@ def main() -> int:
                 time.sleep(args.interval)
                 now = time.monotonic()
                 try:
-                    process_ticks, threads = parse_proc_stat(
-                        Path(f"/proc/{process.pid}/stat").read_text(encoding="ascii")
-                    )
-                    thread_ticks = read_thread_ticks(process.pid)
+                    process_stat = Path(f"/proc/{process.pid}/stat").read_text(encoding="ascii")
+                    (
+                        process_ticks,
+                        threads,
+                        process_minor_faults,
+                        process_major_faults,
+                    ) = parse_proc_stat(process_stat)
+                    thread_counters = read_thread_counters(process.pid)
                     rss_mib = read_rss_mib(process.pid)
                 except (FileNotFoundError, ProcessLookupError):
                     break
@@ -162,18 +170,30 @@ def main() -> int:
                 process_cpu = 0.0
                 hottest_cpu = 0.0
                 hottest_tid = 0
+                process_minor_fault_rate = 0.0
+                process_major_fault_rate = 0.0
+                hottest_minor_fault_rate = 0.0
+                hottest_major_fault_rate = 0.0
                 thread_cpu: list[tuple[float, int]] = []
                 if previous_process_ticks:
                     process_cpu = 100.0 * (process_ticks - previous_process_ticks) / (clock_ticks * elapsed)
-                    for tid, ticks in thread_ticks.items():
-                        prior = previous_thread_ticks.get(tid)
+                    process_minor_fault_rate = (
+                        process_minor_faults - previous_process_minor_faults
+                    ) / elapsed
+                    process_major_fault_rate = (
+                        process_major_faults - previous_process_major_faults
+                    ) / elapsed
+                    for tid, (ticks, minor_faults, major_faults) in thread_counters.items():
+                        prior = previous_thread_counters.get(tid)
                         if prior is None:
                             continue
-                        cpu = 100.0 * (ticks - prior) / (clock_ticks * elapsed)
+                        cpu = 100.0 * (ticks - prior[0]) / (clock_ticks * elapsed)
                         thread_cpu.append((cpu, tid))
                         if cpu > hottest_cpu:
                             hottest_cpu = cpu
                             hottest_tid = tid
+                            hottest_minor_fault_rate = (minor_faults - prior[1]) / elapsed
+                            hottest_major_fault_rate = (major_faults - prior[2]) / elapsed
 
                 top_threads = ";".join(
                     f"{read_thread_name(process.pid, tid)}[{tid}]:{cpu:.1f}%"
@@ -189,6 +209,10 @@ def main() -> int:
                         f"{hottest_cpu:.1f}",
                         hottest_tid or "",
                         read_thread_name(process.pid, hottest_tid),
+                        f"{process_minor_fault_rate:.1f}",
+                        f"{process_major_fault_rate:.1f}",
+                        f"{hottest_minor_fault_rate:.1f}",
+                        f"{hottest_major_fault_rate:.1f}",
                         top_threads,
                         "" if gpu_busy is None else gpu_busy,
                         "" if vram_bytes is None else f"{vram_bytes / (1024 * 1024):.1f}",
@@ -199,7 +223,9 @@ def main() -> int:
                 output.flush()
                 previous_time = now
                 previous_process_ticks = process_ticks
-                previous_thread_ticks = thread_ticks
+                previous_process_minor_faults = process_minor_faults
+                previous_process_major_faults = process_major_faults
+                previous_thread_counters = thread_counters
             reached_duration = process.poll() is None and time.monotonic() - started >= args.duration
     except KeyboardInterrupt:
         pass

@@ -14,6 +14,10 @@ import statistics
 METRICS = (
     "process_cpu_percent",
     "hottest_thread_percent",
+    "process_minor_faults_per_s",
+    "process_major_faults_per_s",
+    "hottest_thread_minor_faults_per_s",
+    "hottest_thread_major_faults_per_s",
     "gpu_busy_percent",
     "vram_used_mib",
     "rss_mib",
@@ -88,14 +92,14 @@ def main() -> int:
         f"samples: {len(samples)}  range: {samples[0]['elapsed_s']:.1f}-"
         f"{samples[-1]['elapsed_s']:.1f}s  warmup: {args.warmup_seconds:.1f}s"
     )
-    print("metric                         mean  median     p95     max")
+    print("metric                                   mean  median     p95     max")
     for metric in METRICS:
         metric_values = values(samples, metric)
         if not metric_values:
-            print(f"{metric:28}    n/a     n/a     n/a     n/a")
+            print(f"{metric:38}    n/a     n/a     n/a     n/a")
             continue
         print(
-            f"{metric:28}"
+            f"{metric:38}"
             f"{statistics.fmean(metric_values):7.1f}"
             f"{statistics.median(metric_values):8.1f}"
             f"{percentile(metric_values, 0.95):8.1f}"

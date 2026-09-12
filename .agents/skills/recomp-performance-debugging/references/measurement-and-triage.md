@@ -27,8 +27,9 @@ python scripts/profile_linux_runtime.py --duration 120 \
   --output /tmp/recomp-host.csv -- ./path/to/game [arguments]
 ```
 
-The sampler uses `/proc` for whole-process and hottest-thread CPU load and,
-when available, `gpu_busy_percent` plus `mem_info_vram_used` from DRM sysfs.
+The sampler uses `/proc` for whole-process and hottest-thread CPU load, minor
+and major fault rates, and, when available, `gpu_busy_percent` plus
+`mem_info_vram_used` from DRM sysfs.
 Select `--gpu-busy-path` explicitly on multi-GPU hosts. Correlate elapsed time
 with the game log; total process CPU can exceed 100% because it includes all
 threads. A nearly saturated hottest thread with low GPU occupancy supports a
@@ -40,6 +41,14 @@ Summarize the capture by fixed time windows with:
 python scripts/analyze_runtime_profile.py /tmp/recomp-host.csv \
   --warmup-seconds 10 --window-seconds 5
 ```
+
+If `ptrace_scope=1` prevents attaching to a running recomp, launch it under GDB
+and follow the game child instead. On MCLA, load
+`scripts/gdb_hot_thread_sampler.py`, pass expected ReXGlue write-watch
+`SIGSEGV`, and use `hot-sample-once OUTPUT_CSV` after repeated short
+interruptions. First verify in the host CSV that one XThread remains dominant;
+the command intentionally selects the XThread with the greatest accumulated
+CPU time. Rank many samples rather than treating one stopped PC as a hotspot.
 
 - Average FPS describes throughput but hides uneven delivery.
 - Median frame time describes the common frame.
@@ -81,3 +90,16 @@ progress outrank a synthetic FPS gain.
   checked-in TOML on link or log the actual path to prevent stale-config tests.
 - Avoid forcing tuning cvars from `OnPreSetup`; doing so invalidates CLI A/B
   experiments and hides machine-specific fallbacks.
+- When a stack shows a GPU command thread inside a mutex, measure total request
+  time, lock-wait time, lock-hold time, and operation counts separately in
+  fixed windows. A blocked snapshot proves the wait exists, not that it owns a
+  meaningful fraction of the frame budget.
+- A sample concentrated on a generated `REX_STORE_*` is not sufficient proof
+  of write-watch overhead. Correlate it with fault rates or a direct handled-
+  fault counter before changing page protection; the sampled instruction may
+  simply be inside genuinely hot guest logic.
+- A project strong-symbol wrapper can measure generated calls that cross
+  translation units, but direct calls to a weak alias in the same generated
+  translation unit may bind locally and bypass the wrapper. Treat a zero count
+  as a probe-coverage result until verified with `nm`, call-site placement, or
+  an entry/mid-assembly hook.

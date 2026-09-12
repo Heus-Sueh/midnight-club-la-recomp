@@ -1,5 +1,8 @@
 #include "native_renderer/native_renderer.h"
 #include "native_renderer/camera_interpolator.h"
+#ifdef MCLA_ENABLE_HOTSPOT_PROBE
+#include "hotspot_probe.h"
+#endif
 
 #include <chrono>
 #include <thread>
@@ -212,6 +215,9 @@ void NativeRenderer::OnGuestPresent() {
       REXLOG_INFO("[NativeRenderer] Presentation stats: guest_fps={:.1f}, frames={}, camera_sampling={}",
                   guest_fps, guest_frame_count_,
                   CameraInterpolator::Get().HasValidHistory() ? "active" : "standby");
+#ifdef MCLA_ENABLE_HOTSPOT_PROBE
+      ReportHotspotProbe(elapsed);
+#endif
       guest_frame_count_ = 0;
       last_report_time_ = now;
     }
