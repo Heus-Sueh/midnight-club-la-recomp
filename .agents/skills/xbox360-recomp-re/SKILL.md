@@ -7,6 +7,10 @@ description: Investigate Xbox 360 PowerPC/XEX behavior for a ReXGlue port and tu
 
 Work from evidence tied to one exact executable revision. The goal is the smallest reproducible correction at the right layer.
 
+For a multi-stage subsystem map, structured knowledge base, target-priority
+queue, or investigation journal, use `$agentic-reverse-engineering` to
+coordinate this specialized workflow.
+
 ## Investigation loop
 
 1. Capture the failure boundary: phase, platform, build type, command line, last log lines, exception or signal, guest PC/LR, and whether the Vulkan device was created.

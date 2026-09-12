@@ -18,6 +18,9 @@ frames.
    conclusions and RelWithDebInfo for Tracy, counters, symbols, or debugger work.
 3. Analyze ReXGlue logs with `scripts/analyze_present_log.py`; discard a stated
    warm-up interval when shader/pipeline startup would bias the comparison.
+   On Linux, use `scripts/profile_linux_runtime.py` when process CPU, hottest
+   thread, AMD GPU occupancy, VRAM, RSS, and thread count are needed alongside
+   the log. Treat it as host-specific evidence, not a cross-platform benchmark.
 4. Compare median and tail latency, not only average FPS. Record p95, p99,
    maximum interval, and counts over meaningful hitch thresholds.
 5. Localize the boundary before fixing it: guest timing/hook, recompiled PPC,

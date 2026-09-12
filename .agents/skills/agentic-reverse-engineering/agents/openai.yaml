@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agentic Reverse Engineering"
+  short_description: "Build revision-bound RE knowledge incrementally"
+  default_prompt: "Use $agentic-reverse-engineering to plan and execute this recompilation investigation from focused evidence, then record reusable findings."

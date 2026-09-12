@@ -20,6 +20,21 @@ counters may materially alter CPU-bound results.
 Use `scripts/analyze_present_log.py LOG [LOG ...] --warmup-seconds N` for logs
 containing `XELOG_GPU PRESENT` timestamps.
 
+On Linux, launch a controlled run with:
+
+```console
+python scripts/profile_linux_runtime.py --duration 120 \
+  --output /tmp/recomp-host.csv -- ./path/to/game [arguments]
+```
+
+The sampler uses `/proc` for whole-process and hottest-thread CPU load and,
+when available, `gpu_busy_percent` plus `mem_info_vram_used` from DRM sysfs.
+Select `--gpu-busy-path` explicitly on multi-GPU hosts. Correlate elapsed time
+with the game log; total process CPU can exceed 100% because it includes all
+threads. A nearly saturated hottest thread with low GPU occupancy supports a
+CPU/serialization hypothesis, while sustained high GPU occupancy supports a
+GPU-bound hypothesis. Neither proves causality without a controlled A/B test.
+
 - Average FPS describes throughput but hides uneven delivery.
 - Median frame time describes the common frame.
 - p95 and p99 expose shader compilation, synchronization, IO and scheduling

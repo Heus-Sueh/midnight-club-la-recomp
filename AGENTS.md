@@ -26,11 +26,19 @@ The project is advancing along the Native Renderer Roadmap (Tier 1 Native Presen
 
 Project skills live under `.agents/skills/` and are automatically discoverable.
 
+- Use `$agentic-reverse-engineering` for multi-stage subsystem discovery,
+  evidence-driven investigation planning, focused Ghidra exports, structured RE
+  knowledge, target prioritization, validation ladders, and investigation journals.
 - Use `$rexglue-project` for scaffold/init/SDK upgrades, manifests, SDK pinning, modules, codegen, generated-file policy, and build-phase planning.
 - Use `$xbox360-recomp-re` for unresolved calls, function discovery, switch tables, hooks, CRT mappings, guest crashes/hangs, title-update address maps, and possible PPC/codegen defects.
 - Use `$sdl-vulkan-portability` for CMake presets, SDL3, Vulkan-only enforcement, GPU plugin staging, Windows/Linux CI, runtime libraries, and packaging.
 - Use `$recomp-performance-debugging` for FPS/stutter regressions, repeatable benchmarks, Tracy/counter captures, hangs, crashes, debugger signals, and determining whether a fault belongs to guest code, ReXGlue, Vulkan, SDL, or host IO.
-- When a task crosses boundaries, use the smallest relevant set. For example, a Windows-only black screen needs `$sdl-vulkan-portability` first; only invoke `$xbox360-recomp-re` if evidence moves the failure into guest GPU behavior.
+- When a task crosses boundaries, use the smallest relevant set. Use
+  `$agentic-reverse-engineering` to coordinate an investigation spanning several
+  subsystem boundaries, then load only the specialized skills needed by the
+  current evidence. For example, a Windows-only black screen needs
+  `$sdl-vulkan-portability` first; only invoke `$xbox360-recomp-re` if evidence
+  moves the failure into guest GPU behavior.
 - Record repeatable reverse-engineering, optimization, profiling, and debugging findings in the relevant skill reference. Add or extend a deterministic tool when the same parsing or validation logic would otherwise be recreated manually. Do not promote a one-off observation until its executable revision, configuration, scene, and validation are recorded.
 
 ## Intended layout
