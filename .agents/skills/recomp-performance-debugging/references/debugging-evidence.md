@@ -31,6 +31,22 @@ Capture both host and guest context when available:
 - generated C++ file/function corresponding to the guest address;
 - recent GPU packets, shader/pipeline cache event and last successful present.
 
+On Linux hosts where ptrace policy rejects attachment, the profiler can remain
+the parent while GDB follows the launched game child:
+
+```console
+gdb --args python scripts/profile_linux_runtime.py --output /tmp/host.csv \
+  -- ./path/to/game [arguments]
+(gdb) set follow-fork-mode child
+(gdb) set detach-on-fork on
+(gdb) run
+```
+
+Only after confirming that first-chance write-watch signals are expected, use
+`handle SIGSEGV nostop noprint pass` so the ReXGlue handler receives them. Read
+the profiler CSV before interrupting to select the actual hottest Linux TIDs;
+capture focused stacks rather than dumping every mostly idle guest thread.
+
 ## Remedy ownership
 
 - Guest-specific address or behavior: revision-bound manifest hint or reviewed

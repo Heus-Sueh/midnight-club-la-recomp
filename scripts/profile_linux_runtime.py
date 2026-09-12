@@ -84,6 +84,15 @@ def read_thread_ticks(pid: int) -> dict[int, int]:
     return values
 
 
+def read_thread_name(pid: int, tid: int) -> str:
+    if not tid:
+        return ""
+    try:
+        return Path(f"/proc/{pid}/task/{tid}/comm").read_text(encoding="utf-8").strip()
+    except (FileNotFoundError, ProcessLookupError):
+        return ""
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--duration", type=float, default=120.0, help="maximum run time in seconds")
@@ -113,6 +122,7 @@ def main() -> int:
     print(f"GPU counter: {gpu_path or 'unavailable'}", flush=True)
 
     process = subprocess.Popen(args.command)
+    print(f"Process PID: {process.pid}", flush=True)
     started = time.monotonic()
     previous_time = started
     previous_process_ticks = 0
@@ -128,6 +138,8 @@ def main() -> int:
                     "process_cpu_percent",
                     "hottest_thread_percent",
                     "hottest_thread_tid",
+                    "hottest_thread_name",
+                    "top_threads",
                     "gpu_busy_percent",
                     "vram_used_mib",
                     "rss_mib",
@@ -150,6 +162,7 @@ def main() -> int:
                 process_cpu = 0.0
                 hottest_cpu = 0.0
                 hottest_tid = 0
+                thread_cpu: list[tuple[float, int]] = []
                 if previous_process_ticks:
                     process_cpu = 100.0 * (process_ticks - previous_process_ticks) / (clock_ticks * elapsed)
                     for tid, ticks in thread_ticks.items():
@@ -157,9 +170,15 @@ def main() -> int:
                         if prior is None:
                             continue
                         cpu = 100.0 * (ticks - prior) / (clock_ticks * elapsed)
+                        thread_cpu.append((cpu, tid))
                         if cpu > hottest_cpu:
                             hottest_cpu = cpu
                             hottest_tid = tid
+
+                top_threads = ";".join(
+                    f"{read_thread_name(process.pid, tid)}[{tid}]:{cpu:.1f}%"
+                    for cpu, tid in sorted(thread_cpu, reverse=True)[:3]
+                )
 
                 gpu_busy = read_integer(gpu_path)
                 vram_bytes = read_integer(vram_path)
@@ -169,6 +188,8 @@ def main() -> int:
                         f"{process_cpu:.1f}",
                         f"{hottest_cpu:.1f}",
                         hottest_tid or "",
+                        read_thread_name(process.pid, hottest_tid),
+                        top_threads,
                         "" if gpu_busy is None else gpu_busy,
                         "" if vram_bytes is None else f"{vram_bytes / (1024 * 1024):.1f}",
                         f"{rss_mib:.1f}",

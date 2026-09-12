@@ -34,6 +34,12 @@ with the game log; total process CPU can exceed 100% because it includes all
 threads. A nearly saturated hottest thread with low GPU occupancy supports a
 CPU/serialization hypothesis, while sustained high GPU occupancy supports a
 GPU-bound hypothesis. Neither proves causality without a controlled A/B test.
+Summarize the capture by fixed time windows with:
+
+```console
+python scripts/analyze_runtime_profile.py /tmp/recomp-host.csv \
+  --warmup-seconds 10 --window-seconds 5
+```
 
 - Average FPS describes throughput but hides uneven delivery.
 - Median frame time describes the common frame.
