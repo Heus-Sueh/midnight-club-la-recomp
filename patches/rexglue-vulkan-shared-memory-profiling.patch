@@ -1,0 +1,92 @@
+diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
+index 6788214..780fdc9 100644
+--- a/src/graphics/vulkan/shared_memory.cpp
++++ b/src/graphics/vulkan/shared_memory.cpp
+@@ -12,0 +13 @@
++#include <chrono>
+@@ -29,0 +31,4 @@ REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
++REXCVAR_DEFINE_BOOL(vulkan_shared_memory_profile, false, "GPU/Vulkan",
++                    "Log aggregate Vulkan shared-memory upload timings every five seconds")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+@@ -31,0 +37,19 @@ namespace rex::graphics::vulkan {
++namespace {
++
++struct SharedMemoryProfileStats {
++  std::chrono::steady_clock::time_point interval_start{};
++  uint64_t calls = 0;
++  uint64_t ranges = 0;
++  uint64_t chunks = 0;
++  uint64_t pages = 0;
++  uint64_t bytes = 0;
++  uint64_t total_ns = 0;
++  uint64_t upload_buffer_ns = 0;
++  uint64_t make_valid_ns = 0;
++  uint64_t memcpy_ns = 0;
++};
++
++thread_local SharedMemoryProfileStats shared_memory_profile_stats;
++
++}  // namespace
++
+@@ -275,0 +300,15 @@ bool VulkanSharedMemory::UploadRanges(
++  const bool profile = REXCVAR_GET(vulkan_shared_memory_profile);
++  const auto upload_started =
++      profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++  SharedMemoryProfileStats& profile_stats = shared_memory_profile_stats;
++  if (profile) {
++    if (profile_stats.interval_start.time_since_epoch().count() == 0) {
++      profile_stats.interval_start = upload_started;
++    }
++    ++profile_stats.calls;
++    profile_stats.ranges += upload_page_ranges.size();
++    for (const auto& upload_range : upload_page_ranges) {
++      profile_stats.pages += upload_range.second;
++    }
++  }
++
+@@ -294,0 +334,2 @@ bool VulkanSharedMemory::UploadRanges(
++      const auto upload_buffer_started =
++          profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+@@ -297,0 +339,2 @@ bool VulkanSharedMemory::UploadRanges(
++      const auto upload_buffer_finished =
++          profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+@@ -303,0 +347,2 @@ bool VulkanSharedMemory::UploadRanges(
++      const auto make_valid_finished =
++          profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+@@ -306,0 +352,15 @@ bool VulkanSharedMemory::UploadRanges(
++      const auto memcpy_finished =
++          profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++      if (profile) {
++        ++profile_stats.chunks;
++        profile_stats.bytes += upload_buffer_size;
++        profile_stats.upload_buffer_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                              upload_buffer_finished - upload_buffer_started)
++                                              .count();
++        profile_stats.make_valid_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                           make_valid_finished - upload_buffer_finished)
++                                           .count();
++        profile_stats.memcpy_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                       memcpy_finished - make_valid_finished)
++                                       .count();
++      }
+@@ -331,0 +392,19 @@ bool VulkanSharedMemory::UploadRanges(
++  if (profile) {
++    const auto upload_finished = std::chrono::steady_clock::now();
++    profile_stats.total_ns +=
++        std::chrono::duration_cast<std::chrono::nanoseconds>(upload_finished - upload_started)
++            .count();
++    if (upload_finished - profile_stats.interval_start >= std::chrono::seconds(5)) {
++      constexpr double kNsToMs = 1.0 / 1'000'000.0;
++      REXGPU_INFO(
++          "Vulkan shared memory profile: calls={} ranges={} chunks={} pages={} bytes={} "
++          "total_ms={:.3f} upload_buffer_ms={:.3f} make_valid_ms={:.3f} memcpy_ms={:.3f}",
++          profile_stats.calls, profile_stats.ranges, profile_stats.chunks, profile_stats.pages,
++          profile_stats.bytes, double(profile_stats.total_ns) * kNsToMs,
++          double(profile_stats.upload_buffer_ns) * kNsToMs,
++          double(profile_stats.make_valid_ns) * kNsToMs,
++          double(profile_stats.memcpy_ns) * kNsToMs);
++      profile_stats = {};
++      profile_stats.interval_start = upload_finished;
++    }
++  }

@@ -123,6 +123,8 @@ git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-texture-cache-profilin
 git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-linux-write-watch-fastpath.patch
 git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-gpu-register-logging-fastpath.patch
 git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-vulkan-submission-diagnostics.patch
+git -C thirdparty/rexglue-sdk apply --unidiff-zero \
+  ../../patches/rexglue-vulkan-shared-memory-profiling.patch
 ```
 
 ## Extract the game

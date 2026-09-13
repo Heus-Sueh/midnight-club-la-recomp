@@ -142,3 +142,15 @@ progress outrank a synthetic FPS gain.
   cvar lookup was removable by boolean equivalence, yet its controlled A/B was
   within run variance. Preserve the negative result and move to the next
   measured phase rather than accumulating plausible micro-optimizations.
+- A high cache hit rate does not establish a performance win. A conservative
+  Vulkan texture descriptor cache reused 48-57% of stage descriptor sets in
+  MCLA gameplay and over 99% during boot, but per-draw comparison and cache
+  maintenance produced no FPS or CPU improvement. Measure the complete A/B and
+  remove the cache when avoided API calls do not improve the limiting thread.
+- For Vulkan shared-memory upload stalls, separate upload-buffer allocation,
+  write-watch rearming, and copying. MCLA issued roughly 98k-121k tiny uploads
+  per five seconds; `MakeRangeValid`/Linux `mprotect` cost 603-745 ms while
+  `memcpy` cost 99-117 ms. Optimize protection and handled-fault frequency only
+  while preserving the invariant that the watch is armed before CPU-to-GPU
+  copying. Use the project's default-off shared-memory profiling patch for
+  target selection, not final FPS comparison.

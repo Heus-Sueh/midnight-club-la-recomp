@@ -250,6 +250,48 @@ Controlled negative experiments were removed rather than shipped:
 - the x86-64 small code model linked and reduced the executable from 72 to
   67 MiB, but its measured windows still ranged from 19.9 to 30.0 FPS.
 
+## Vulkan descriptor reuse experiment
+
+`VulkanCommandProcessor::UpdateBindings` unconditionally rewrites transient
+vertex and pixel texture descriptor sets for every draw. A conservative
+same-frame cache compared the pipeline descriptor-set layout plus the resolved
+`VkImageView`, image layout, and `VkSampler` values. Frame startup retained the
+SDK's existing invalidation so no transient descriptor set was reused after
+frame reclamation.
+
+The cache demonstrated substantial reuse potential: boot windows reached
+99.0-99.8%, while late gameplay windows reused 48.4-57.1% of stage descriptor
+sets. It did not improve throughput. The two final five-second gameplay windows
+were 24.7 and 25.6 FPS without the cache versus 24.1 and 25.8 FPS with it;
+process CPU did not decrease. The comparison and cache-maintenance work offset
+the avoided allocation and `vkUpdateDescriptorSets` calls, or those calls were
+not limiting the command thread. The experiment was removed rather than
+shipping a plausible optimization without a measurable gain.
+
+## Vulkan shared-memory upload target
+
+The default-off diagnostic patch
+`patches/rexglue-vulkan-shared-memory-profiling.patch` adds
+`vulkan_shared_memory_profile`. It separates upload-buffer allocation,
+`MakeRangeValid`, and `memcpy` time, and reports calls, ranges, chunks, pages,
+and bytes in five-second windows. It must not be enabled for final FPS A/B
+results because it reads the host clock around every upload phase.
+
+In late gameplay the probe observed 97,629-120,560 upload calls per five
+seconds, 99,511-122,578 ranges, and 216,000-272,284 pages. The uploads moved
+approximately 0.88-1.12 GB per window. `MakeRangeValid`, which rearms physical
+memory invalidation callbacks and reaches Linux `mprotect`, consumed
+603.4-744.6 ms per window. The actual `memcpy` consumed only 98.7-116.9 ms and
+upload-buffer allocation 6.0-6.6 ms. Most calls therefore cover only one or two
+host pages, making protection syscall and handled-fault frequency the next
+optimization boundary.
+
+Any replacement must preserve the race invariant documented on
+`SharedMemory::MakeRangeValid`: a range becomes watched before CPU-to-GPU copy
+so a concurrent guest write cannot be missed. Measure protection calls per
+physical alias and invalidation breadth before attempting wider watches,
+batched protection, or an always-upload compatibility path.
+
 ## Conclusion and confidence
 
 High confidence: the original severe regression was dominated by a redundant
@@ -266,18 +308,23 @@ High confidence: optimizing one sampled guest helper in isolation is
 insufficient. Three semantics-preserving local experiments failed to produce a
 repeatable throughput improvement after the host fix.
 
+High confidence: transient texture descriptor rewrites have a high theoretical
+reuse rate but are not a demonstrated FPS bottleneck with a compare-on-draw
+cache. Shared-memory write-watch rearming now has the larger measured host-side
+ceiling.
+
 ## Validation level and next target
 
 Reached smoke gameplay plus repeatable host profiling and one controlled
 negative test. This is not extended gameplay or a deterministic benchmark.
 
-Next, create a deterministic gameplay input/replay window before making another
-throughput claim, then measure queue depth and wait duration around
-`0x82411E98` together with GPU command-buffer submission/completion. The goal is
-to distinguish guest command production, backend translation, and driver
-execution without changing synchronization semantics. Do not add another
-single-function native replacement unless the synchronized trace establishes
-an optimization ceiling large enough to reach 30 FPS.
+Next, count protection operations and handled invalidations per physical alias
+inside `PhysicalHeap::EnableAccessCallbacks` and `TriggerCallbacks`. Test a
+reversible coalescing strategy only if it preserves the pre-copy watch race
+invariant. A deterministic gameplay input/replay window is still required
+before claiming a precise throughput improvement. Do not add another
+single-function native replacement unless a synchronized trace establishes an
+optimization ceiling large enough to reach 30 FPS.
 
 ## Guest queue wait and Vulkan submission correlation
 
