@@ -48,6 +48,12 @@ Git.
   4–14 FPS to 18–30 FPS and GPU occupancy from about 36% to 58%. Gameplay is
   substantially faster but is not yet a constant 30 FPS; see the current
   investigation report for the remaining mixed guest/GPU-command bottleneck.
+- A causal negative control now confirms CPU-side Xenos-to-Vulkan draw
+  translation as the limiting boundary in the tested sequence: bypassing draw
+  translation reduced `GPU Commands` CPU from 84.1% to 25.4% and restored an
+  exact 30.00 FPS presentation rate. The bypass intentionally produces invalid
+  output and is diagnostic only; see the
+  [focused investigation report](docs/investigations/xenos-draw-translation-bottleneck-2026-09-13.md).
 
 ReXGlue currently reports 20 `Unexpected float16_4 pack instruction` warnings
 during code generation. Treat them as a known correctness risk until those PPC
@@ -73,8 +79,8 @@ python scripts/analyze_runtime_profile.py /tmp/mcla-host.csv \
   --warmup-seconds 25
 ```
 
-The CSV includes process and hottest-thread CPU, page-fault rates, AMD GPU
-occupancy, VRAM, RSS, and thread identity. The current gameplay bottleneck
+The CSV includes process, hottest-thread, and tracked `GPU Commands` CPU,
+page-fault rates, AMD GPU occupancy, VRAM, RSS, and thread identity. The current gameplay bottleneck
 investigation and GDB guest-thread sampling procedure are documented in
 `docs/investigations/gameplay-cpu-bottleneck-2026-09-12.md`.
 
@@ -167,6 +173,8 @@ git -C thirdparty/rexglue-sdk apply --unidiff-zero \
 git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-physical-access-profiling.patch
 git -C thirdparty/rexglue-sdk apply \
   ../../patches/rexglue-shared-memory-invalidation-granularity.patch
+git -C thirdparty/rexglue-sdk apply \
+  ../../patches/rexglue-vulkan-draw-bypass-diagnostic.patch
 ```
 
 ## Extract the game

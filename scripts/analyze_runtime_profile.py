@@ -18,6 +18,7 @@ METRICS = (
     "process_major_faults_per_s",
     "hottest_thread_minor_faults_per_s",
     "hottest_thread_major_faults_per_s",
+    "tracked_thread_percent",
     "gpu_busy_percent",
     "vram_used_mib",
     "rss_mib",
@@ -114,7 +115,7 @@ def main() -> int:
 
     first_window = math.floor(samples[0]["elapsed_s"] / args.window_seconds)
     last_window = math.floor(samples[-1]["elapsed_s"] / args.window_seconds)
-    print("\nwindow_s       proc_cpu  hot_thread  gpu_busy  rss_max  vram_max")
+    print("\nwindow_s       proc_cpu  hot_thread  tracked  gpu_busy  rss_max  vram_max")
     for window_index in range(first_window, last_window + 1):
         start = window_index * args.window_seconds
         end = start + args.window_seconds
@@ -127,6 +128,7 @@ def main() -> int:
             f"{start:5.0f}-{end:<5.0f}"
             f"{format_number(mean(window, 'process_cpu_percent'), 10)}"
             f"{format_number(mean(window, 'hottest_thread_percent'), 12)}"
+            f"{format_number(mean(window, 'tracked_thread_percent'), 9)}"
             f"{format_number(mean(window, 'gpu_busy_percent'), 10)}"
             f"{format_number(max(rss) if rss else math.nan, 9)}"
             f"{format_number(max(vram) if vram else math.nan, 10)}"

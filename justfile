@@ -14,6 +14,10 @@ default:
 test-memory:
     "{{ python }}" -m unittest discover -s scripts -p test_analyze_physical_access.py
 
+# Run all project-authored Python regression tests.
+test-tools:
+    "{{ python }}" -m unittest discover -s scripts -p "test_*.py"
+
 # Configure the selected preset (Vulkan enabled, D3D12 disabled).
 configure:
     "{{ cmake }}" --preset {{ preset }}

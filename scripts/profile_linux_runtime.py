@@ -97,6 +97,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval", type=float, default=0.5, help="sampling interval in seconds")
     parser.add_argument("--output", required=True, type=Path, help="destination CSV path")
     parser.add_argument("--gpu-busy-path", help="override the auto-detected sysfs GPU busy counter")
+    parser.add_argument(
+        "--tracked-thread-prefix",
+        default="GPU Commands",
+        help="thread-name prefix whose combined CPU usage is recorded",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER, help="command to run, after --")
     args = parser.parse_args()
     if args.command and args.command[0] == "--":
@@ -127,6 +132,7 @@ def main() -> int:
     previous_process_minor_faults = 0
     previous_process_major_faults = 0
     previous_thread_counters: dict[int, tuple[int, int, int]] = {}
+    thread_names: dict[int, str] = {}
     reached_duration = False
 
     try:
@@ -143,6 +149,8 @@ def main() -> int:
                     "process_major_faults_per_s",
                     "hottest_thread_minor_faults_per_s",
                     "hottest_thread_major_faults_per_s",
+                    "tracked_thread_percent",
+                    "tracked_thread_count",
                     "top_threads",
                     "gpu_busy_percent",
                     "vram_used_mib",
@@ -162,6 +170,9 @@ def main() -> int:
                         process_major_faults,
                     ) = parse_proc_stat(process_stat)
                     thread_counters = read_thread_counters(process.pid)
+                    for tid in thread_counters:
+                        if tid not in thread_names:
+                            thread_names[tid] = read_thread_name(process.pid, tid)
                     rss_mib = read_rss_mib(process.pid)
                 except (FileNotFoundError, ProcessLookupError):
                     break
@@ -196,9 +207,15 @@ def main() -> int:
                             hottest_major_fault_rate = (major_faults - prior[2]) / elapsed
 
                 top_threads = ";".join(
-                    f"{read_thread_name(process.pid, tid)}[{tid}]:{cpu:.1f}%"
+                    f"{thread_names.get(tid, '')}[{tid}]:{cpu:.1f}%"
                     for cpu, tid in sorted(thread_cpu, reverse=True)[:3]
                 )
+                tracked_threads = [
+                    (cpu, tid)
+                    for cpu, tid in thread_cpu
+                    if thread_names.get(tid, "").startswith(args.tracked_thread_prefix)
+                ]
+                tracked_thread_cpu = sum(cpu for cpu, _ in tracked_threads)
 
                 gpu_busy = read_integer(gpu_path)
                 vram_bytes = read_integer(vram_path)
@@ -208,11 +225,13 @@ def main() -> int:
                         f"{process_cpu:.1f}",
                         f"{hottest_cpu:.1f}",
                         hottest_tid or "",
-                        read_thread_name(process.pid, hottest_tid),
+                        thread_names.get(hottest_tid, ""),
                         f"{process_minor_fault_rate:.1f}",
                         f"{process_major_fault_rate:.1f}",
                         f"{hottest_minor_fault_rate:.1f}",
                         f"{hottest_major_fault_rate:.1f}",
+                        f"{tracked_thread_cpu:.1f}",
+                        len(tracked_threads),
                         top_threads,
                         "" if gpu_busy is None else gpu_busy,
                         "" if vram_bytes is None else f"{vram_bytes / (1024 * 1024):.1f}",

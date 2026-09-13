@@ -387,3 +387,15 @@ texture and sampler bindings. Any cache must include shader binding layout,
 active image views, samplers, pipeline-layout compatibility, and frame/resource
 lifetime; validate it with a cache hit counter and a visual negative control
 before changing descriptor allocation or update behavior.
+
+## Subsequent causal boundary proof
+
+The descriptor reuse experiment was later rejected, and shared-memory
+invalidation granularity produced only a small usable improvement. A focused
+negative control then consumed PM4 packets while bypassing Vulkan `IssueDraw`.
+It reduced `GPU Commands` CPU from 84.1% to 25.4% and restored exactly 30.00
+presentation FPS in the tested fresh-launch sequence. Combined with this
+report's manual-gameplay queue-wait and zero-fence-wait evidence, CPU-side
+Xenos-to-Vulkan draw translation is now the proven limiting boundary. The
+remaining target-selection question is which `IssueDraw` sub-phase dominates;
+see `xenos-draw-translation-bottleneck-2026-09-13.md`.

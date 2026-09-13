@@ -178,3 +178,13 @@ progress outrank a synthetic FPS gain.
   Keep the SDK default conservative, place a reversible override in the game
   configuration, and require a deterministic driving route plus a longer
   corruption soak before treating it as broadly validated.
+- To prove a command-translation boundary causally, pair thread-specific CPU
+  accounting with a destructive, default-off negative control that consumes
+  packets but bypasses backend draws. Cache the control at initialization and
+  emit a positive activation warning; never query the cvar per draw. A useful
+  proof requires the targeted worker CPU and the observed frame deficit to
+  collapse together, plus independent evidence rejecting fence waits or GPU
+  saturation. The bypass makes output invalid and establishes an optimization
+  ceiling only. In MCLA's tested sequence it moved `GPU Commands` from 84.1%
+  to 25.4% CPU while presentation reached exactly 30.00 FPS; see
+  `docs/investigations/xenos-draw-translation-bottleneck-2026-09-13.md`.
