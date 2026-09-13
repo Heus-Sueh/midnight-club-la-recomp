@@ -127,3 +127,18 @@ progress outrank a synthetic FPS gain.
   translation unit may bind locally and bypass the wrapper. Treat a zero count
   as a probe-coverage result until verified with `nm`, call-site placement, or
   an entry/mid-assembly hook.
+- Correlate guest ring-buffer polling with backend submission data before
+  treating it as a physical-GPU wait. Long guest waits combined with zero
+  blocking fence waits, shallow in-flight depth, and a saturated GPU-command
+  thread identify command-stream consumption or translation as the boundary.
+  Measure deferred-command execution and queue submission separately; neither
+  should inherit the whole `EndSubmission` duration.
+- High-frequency draw diagnostics can perturb the bottleneck. Multiple host
+  clock reads per draw are acceptable for one target-selection capture, but not
+  for an FPS A/B. Remove the granular probe afterward or keep it default-off,
+  and use its phase totals only to choose a lower-overhead counter experiment.
+- A hot stack may expose a logically redundant mutex or allocation without
+  establishing a useful optimization ceiling. MCLA's per-draw legacy readback
+  cvar lookup was removable by boolean equivalence, yet its controlled A/B was
+  within run variance. Preserve the negative result and move to the next
+  measured phase rather than accumulating plausible micro-optimizations.

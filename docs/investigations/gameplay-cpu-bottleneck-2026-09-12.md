@@ -278,3 +278,65 @@ to distinguish guest command production, backend translation, and driver
 execution without changing synchronization semantics. Do not add another
 single-function native replacement unless the synchronized trace establishes
 an optimization ceiling large enough to reach 30 FPS.
+
+## Guest queue wait and Vulkan submission correlation
+
+The next capture enabled the project hotspot probe for `0x82411E98` and the
+default-off `vulkan_submission_diagnostics` SDK patch. The SDK probe reports
+five-second totals for blocking fence waits, deferred-command translation,
+`vkQueueSubmit`, and in-flight submission depth. It does not change queue or
+synchronization behavior.
+
+In the settled gameplay windows, `0x82411E98` consumed between roughly 52% and
+68% of one guest thread's wall time. Over the same windows, Vulkan reported:
+
+- zero blocking fence waits and zero time in blocking `vkWaitForFences` calls;
+- an average queue depth close to 2, with a maximum of 3 to 5;
+- about 550 ms per five seconds in `DeferredCommandBuffer::Execute` (11.0% of
+  one CPU thread);
+- about 22 ms per five seconds in queue acquisition plus `vkQueueSubmit`
+  (0.44% of one CPU thread).
+
+This rejects host GPU fence latency and queue submission as the cause of the
+guest polling time. The guest is waiting for the `GPU Commands` worker to
+consume and translate its PM4 stream. Driver-side command recording is real
+work, but it is not large enough to explain the worker saturation by itself.
+
+A temporary, more intrusive `IssueDraw` phase probe was used once and then
+removed. In the lowest-FPS windows it observed approximately 812,000 to 837,000
+`IssueDraw` calls per five seconds and 3.75 to 3.79 seconds of inclusive draw
+translation time. Representative phase totals per five seconds were:
+
+- pre-texture shader, primitive, and sampler work: 0.98 to 1.02 seconds;
+- texture requests: 0.41 to 0.44 seconds;
+- render-target update: about 0.30 seconds;
+- pipeline lookup/configuration: about 0.12 seconds;
+- dynamic state, constants, and descriptor bindings: 0.86 to 1.02 seconds;
+- shared-memory and vertex/memexport preparation: 0.76 to 0.79 seconds;
+- remaining draw recording: about 0.26 seconds.
+
+The phase probe executes multiple host clock reads per draw and therefore must
+not be used for an FPS comparison. Its values are target-selection evidence,
+not production overhead measurements.
+
+One sampled stack also found `IsReadbackMemexportEnabled` querying the global
+cvar registry from every draw. Replacing this boolean compatibility query with
+an equivalent direct expression removed the mutex/string lookup, but a
+controlled run changed mean presentation from 25.68 to 25.46 FPS. The change
+was removed because it had no measurable throughput benefit.
+
+Run the retained low-overhead queue diagnostic with:
+
+```console
+./midnight_club_la --vulkan_submission_diagnostics=true \
+  --log_level=info --log_file=/tmp/mcla-queue.log
+python scripts/analyze_gpu_queue_log.py /tmp/mcla-queue.log --skip-windows 4
+```
+
+The highest-value next target is the per-draw descriptor/binding path. In
+particular, `UpdateBindings` currently invalidates both texture descriptor-set
+value bits on every draw and contains an explicit TODO to reuse unchanged
+texture and sampler bindings. Any cache must include shader binding layout,
+active image views, samplers, pipeline-layout compatibility, and frame/resource
+lifetime; validate it with a cache hit counter and a visual negative control
+before changing descriptor allocation or update behavior.

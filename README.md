@@ -122,6 +122,7 @@ git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-vulkan-performance-sta
 git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-texture-cache-profiling.patch
 git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-linux-write-watch-fastpath.patch
 git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-gpu-register-logging-fastpath.patch
+git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-vulkan-submission-diagnostics.patch
 ```
 
 ## Extract the game

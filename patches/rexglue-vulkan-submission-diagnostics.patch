@@ -1,0 +1,173 @@
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 001f36b..246bb7f 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <chrono>
+ #include <cstdint>
+ #include <cstring>
+ #include <iterator>
+@@ -69,10 +70,73 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+                     "device (falls back to render passes otherwise)")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(vulkan_submission_diagnostics, false, "GPU/Vulkan",
++                    "Log five-second Vulkan submission, fence wait, and queue-depth statistics")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::graphics::vulkan {
+ 
+ namespace {
+ 
++struct SubmissionDiagnostics {
++  std::chrono::steady_clock::time_point interval_start{};
++  uint64_t submissions = 0;
++  uint64_t swaps = 0;
++  uint64_t blocking_fence_waits = 0;
++  uint64_t fences_blocked_on = 0;
++  uint64_t fences_completed = 0;
++  uint64_t fence_wait_ns = 0;
++  uint64_t deferred_execute_ns = 0;
++  uint64_t queue_submit_ns = 0;
++  uint64_t in_flight_sum = 0;
++  uint64_t in_flight_max = 0;
++
++  void Reset(std::chrono::steady_clock::time_point now) {
++    *this = {};
++    interval_start = now;
++  }
++};
++
++SubmissionDiagnostics* GetSubmissionDiagnostics() {
++  static SubmissionDiagnostics diagnostics;
++  if (!REXCVAR_GET(vulkan_submission_diagnostics)) {
++    diagnostics.interval_start = {};
++    return nullptr;
++  }
++  if (diagnostics.interval_start.time_since_epoch().count() == 0) {
++    diagnostics.Reset(std::chrono::steady_clock::now());
++  }
++  return &diagnostics;
++}
++
++void MaybeReportSubmissionDiagnostics(SubmissionDiagnostics& diagnostics,
++                                      uint64_t in_flight) {
++  const auto now = std::chrono::steady_clock::now();
++  const double elapsed_seconds = std::chrono::duration<double>(
++                                     now - diagnostics.interval_start)
++                                     .count();
++  if (elapsed_seconds < 5.0) {
++    return;
++  }
++  const double ns_to_ms = 1.0 / 1'000'000.0;
++  REXGPU_INFO(
++      "[VulkanSubmissionDiagnostics] elapsed_s={:.3f}, submissions={}, swaps={}, "
++      "submissions_per_s={:.1f}, in_flight_avg={:.2f}, in_flight_max={}, "
++      "blocking_fence_waits={}, fences_blocked_on={}, fences_completed={}, "
++      "fence_wait_ms={:.3f}, deferred_execute_ms={:.3f}, queue_submit_ms={:.3f}",
++      elapsed_seconds, diagnostics.submissions, diagnostics.swaps,
++      static_cast<double>(diagnostics.submissions) / elapsed_seconds,
++      diagnostics.submissions
++          ? static_cast<double>(diagnostics.in_flight_sum) / diagnostics.submissions
++          : static_cast<double>(in_flight),
++      diagnostics.in_flight_max, diagnostics.blocking_fence_waits,
++      diagnostics.fences_blocked_on, diagnostics.fences_completed,
++      static_cast<double>(diagnostics.fence_wait_ns) * ns_to_ms,
++      static_cast<double>(diagnostics.deferred_execute_ns) * ns_to_ms,
++      static_cast<double>(diagnostics.queue_submit_ns) * ns_to_ms);
++  diagnostics.Reset(now);
++}
++
+ // glslang default built-in resource limits.
+ constexpr TBuiltInResource kGlslangDefaultTBuiltInResource = {
+     /* .maxLights = */ 32,
+@@ -4964,15 +5028,25 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+ 
+   size_t fences_total = submissions_in_flight_fences_.size();
+   size_t fences_awaited = 0;
++  SubmissionDiagnostics* diagnostics = GetSubmissionDiagnostics();
+   if (await_submission > submission_completed_) {
+     // Await in a blocking way if requested.
+     // TODO(Triang3l): Await only one fence. "Fence signal operations that are
+     // defined by vkQueueSubmit additionally include in the first
+     // synchronization scope all commands that occur earlier in submission
+     // order."
++    const auto fence_wait_started = std::chrono::steady_clock::now();
+     VkResult wait_result =
+         dfn.vkWaitForFences(device, uint32_t(await_submission - submission_completed_),
+                             submissions_in_flight_fences_.data(), VK_TRUE, UINT64_MAX);
++    if (diagnostics) {
++      ++diagnostics->blocking_fence_waits;
++      diagnostics->fences_blocked_on += await_submission - submission_completed_;
++      diagnostics->fence_wait_ns +=
++          std::chrono::duration_cast<std::chrono::nanoseconds>(
++              std::chrono::steady_clock::now() - fence_wait_started)
++              .count();
++    }
+     if (wait_result == VK_SUCCESS) {
+       fences_awaited += await_submission - submission_completed_;
+     } else {
+@@ -5006,6 +5080,9 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+     // Not updated - no need to reclaim or download things.
+     return;
+   }
++  if (diagnostics) {
++    diagnostics->fences_completed += fences_awaited;
++  }
+   // Reclaim fences.
+   fences_free_.reserve(fences_free_.size() + fences_awaited);
+   auto submissions_in_flight_fences_awaited_end = submissions_in_flight_fences_.cbegin();
+@@ -5385,7 +5462,15 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+       REXGPU_ERROR("Failed to begin a Vulkan command buffer");
+       return false;
+     }
++    SubmissionDiagnostics* diagnostics = GetSubmissionDiagnostics();
++    const auto deferred_execute_started = std::chrono::steady_clock::now();
+     deferred_command_buffer_.Execute(command_buffer.buffer);
++    if (diagnostics) {
++      diagnostics->deferred_execute_ns +=
++          std::chrono::duration_cast<std::chrono::nanoseconds>(
++              std::chrono::steady_clock::now() - deferred_execute_started)
++              .count();
++    }
+     if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
+       REXGPU_ERROR("Failed to end a Vulkan command buffer");
+       return false;
+@@ -5414,11 +5499,18 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+       return false;
+     }
+     VkResult submit_result;
++    const auto queue_submit_started = std::chrono::steady_clock::now();
+     {
+       ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
+           vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
+       submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence);
+     }
++    if (diagnostics) {
++      diagnostics->queue_submit_ns +=
++          std::chrono::duration_cast<std::chrono::nanoseconds>(
++              std::chrono::steady_clock::now() - queue_submit_started)
++              .count();
++    }
+     if (submit_result != VK_SUCCESS) {
+       REXGPU_ERROR("Failed to submit a Vulkan command buffer");
+       if (submit_result == VK_ERROR_DEVICE_LOST && !device_lost_) {
+@@ -5441,6 +5533,15 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+     submissions_in_flight_fences_.push_back(fence);
+     fences_free_.pop_back();
+ 
++    if (diagnostics) {
++      ++diagnostics->submissions;
++      diagnostics->swaps += is_swap ? 1 : 0;
++      const uint64_t in_flight = submissions_in_flight_fences_.size();
++      diagnostics->in_flight_sum += in_flight;
++      diagnostics->in_flight_max = std::max(diagnostics->in_flight_max, in_flight);
++      MaybeReportSubmissionDiagnostics(*diagnostics, in_flight);
++    }
++
+     submission_open_ = false;
+   }
+ 
