@@ -51,6 +51,14 @@ the command selects the matching thread with the greatest accumulated CPU
 time. Its optional second argument chooses another name prefix, such as
 `hot-sample-once OUTPUT_CSV "GPU Commands"`. Rank many samples rather than
 treating one stopped PC as a hotspot.
+For repeatable short captures, use
+`hot-sample-loop OUTPUT_CSV NAME_PREFIX COUNT INTERVAL_S [WARMUP_S]` and rank
+both leaf and inclusive stack frequency with
+`scripts/analyze_hot_thread_samples.py CAPTURE [CAPTURE ...]`. Keep GDB batches
+bounded and aggregate their CSV files: repeated debugger interrupts may make
+long loops unstable. Preserve idle samples in the denominator, and do not
+discard unknown leaf frames when their symbolized parents still locate the
+subsystem.
 
 - Average FPS describes throughput but hides uneven delivery.
 - Median frame time describes the common frame.
@@ -178,6 +186,13 @@ progress outrank a synthetic FPS gain.
   Keep the SDK default conservative, place a reversible override in the game
   configuration, and require a deterministic driving route plus a longer
   corruption soak before treating it as broadly validated.
+- Fewer host page faults do not establish a write-watch optimization. In a
+  later MCLA control, widening invalidation from 16 to 64 pages reduced faults
+  in one host run but left `GPU Commands` saturated and reduced presentation
+  from the 29.22 FPS baseline to 27.02 FPS. Wider invalidation can trade fault
+  overhead for excess shared-memory upload and Vulkan work. Measure FPS,
+  limiting-thread CPU, faults, uploaded bytes, and visual correctness together;
+  keep the narrower setting when the complete pipeline regresses.
 - To prove a command-translation boundary causally, pair thread-specific CPU
   accounting with a destructive, default-off negative control that consumes
   packets but bypasses backend draws. Cache the control at initialization and

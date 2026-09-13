@@ -56,6 +56,10 @@ analyze-queue log:
 analyze-memory log:
     "{{ python }}" scripts/analyze_physical_access.py "{{ log }}"
 
+# Rank leaf and inclusive functions from GDB hot-thread samples.
+analyze-samples capture:
+    "{{ python }}" scripts/analyze_hot_thread_samples.py "{{ capture }}"
+
 # Extract only the executable from an owned disc image.
 extract-xex iso:
     "{{ python }}" scripts/extract_xex.py "{{ iso }}"

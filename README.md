@@ -132,6 +132,7 @@ just analyze-profile /tmp/mcla-host.csv 25
 just analyze-present /path/to/run.log 25
 just analyze-queue /path/to/run.log
 just analyze-memory /path/to/run.log
+just analyze-samples /tmp/mcla-gpu-samples.csv
 ```
 
 `profile` is Linux-only; the build, extraction and analysis recipes also support
@@ -153,6 +154,20 @@ defaults to off and requires a restart. It logs cumulative counters every
 65,536 enable calls per alias; `analyze-memory` needs two snapshots per alias
 and uses last minus first. These are callback counters, not exclusively CPU
 faults. Diagnostic captures do not establish an uninstrumented FPS gain.
+
+When `perf` or debugger attachment is unavailable on Linux, launch the recomp
+under GDB with `scripts/gdb_hot_thread_sampler.py`. The `hot-sample-loop`
+command records full stacks for the busiest matching thread in bounded batches;
+keep batches at 20 samples or fewer and aggregate multiple CSV files with:
+
+```sh
+python scripts/analyze_hot_thread_samples.py \
+  /tmp/mcla-gpu-a.csv /tmp/mcla-gpu-b.csv --limit 30
+```
+
+The analyzer reports both leaf and inclusive stack frequency. Preserve idle
+samples in the denominator and pass ReXGlue write-watch `SIGSEGV` signals to
+the inferior rather than treating them as crashes.
 
 ## SDK setup
 

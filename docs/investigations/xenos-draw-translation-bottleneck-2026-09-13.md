@@ -84,11 +84,74 @@ driving route or extended gameplay soak. It proves the subsystem boundary, not
 which `IssueDraw` sub-phase should be replaced or whether every scene has the
 same bottleneck.
 
+## Sub-phase sampling follow-up
+
+The next pass extended `scripts/gdb_hot_thread_sampler.py` to retain up to 16
+function names per sample and added `scripts/analyze_hot_thread_samples.py` to
+rank both leaf functions and inclusive stack presence. Two bounded captures
+produced 26 usable `GPU Commands` samples. GDB itself aborted after the sixth
+sample of the second batch, so the evidence is suitable for selecting a target,
+not for assigning precise percentages.
+
+Of all samples, 16 (61.5%) contained `VulkanCommandProcessor::IssueDraw`.
+Within the complete capture, the repeated draw sub-paths were:
+
+| Inclusive path | Samples | All samples |
+| --- | ---: | ---: |
+| `VulkanRenderTargetCache::Update` | 4 | 15.4% |
+| `PhysicalHeap::EnableAccessCallbacks` | 4 | 15.4% |
+| `VulkanCommandProcessor::UpdateBindings` | 3 | 11.5% |
+| `VulkanSharedMemory::UploadRanges` | 2 | 7.7% |
+| `VulkanRenderTargetCache::Resolve` / `IssueCopy` | 2 | 7.7% |
+
+Seven samples (26.9%) caught the command thread waiting for work. Idle samples
+remain in the denominator because silently removing them would overstate the
+cost of the active paths. Unknown leaf frames also remain because stripped
+library or driver frames still have useful symbolized parents.
+
+```sh
+gdb -q -nx -batch -x scripts/gdb_hot_thread_sampler.py \
+  -ex 'set debuginfod enabled off' \
+  -ex 'handle SIGSEGV nostop noprint pass' -ex start \
+  -ex 'hot-sample-loop /tmp/mcla-gpu-a.csv "GPU Commands" 20 0.15 25' \
+  --args out/build/linux-amd64-release/midnight_club_la
+python scripts/analyze_hot_thread_samples.py \
+  /tmp/mcla-gpu-a.csv /tmp/mcla-gpu-b.csv --limit 30
+```
+
+Keep automated GDB batches at 20 samples or fewer and combine their CSV files;
+long interrupt loops were not stable with the local GDB 17.2 build.
+
+## Write-watch breadth control
+
+The existing physical-access counters then quantified the memory side of the
+sampled path. During one 35-second post-warm-up interval, alias `A0000000`
+received 393,216 enable requests and issued 343,619 protection calls covering
+579,171 pages, only 1.69 pages per `mprotect`. It also handled 78,355 one-page
+callback requests, each expanded to the configured 16-page invalidation limit.
+Alias `C0000000` received the same enable requests but issued no protection;
+this single scene is not enough evidence to disable that alias globally.
+
+A counter-enabled capture at 16 pages presented at 28.60 FPS, while the clean
+16-page causal baseline above presented at 29.22 FPS. A clean 64-page control,
+using the SDK default breadth, presented at 27.02 FPS with five of six windows
+below 30 FPS and two below 25 FPS. It also kept `GPU Commands` near saturation
+at 87.1% CPU. The 64-page run logged no fatal Vulkan or device-loss error, but
+it was not visually compared frame-for-frame.
+
+The control rejects wider invalidation as a throughput optimization for this
+captured sequence. Fewer observed host faults did not reduce the limiting
+thread; the wider dirty region plausibly increased excess shared-memory upload
+and Vulkan work. This is an inference, not a directly measured byte comparison
+for the same run.
+
 ## Next target
 
-Retain the default-off bypass solely as a negative-control tool. The next
-optimization target is inside `IssueDraw`, using low-overhead counters or
-statistical sampling to rank primitive/shader preparation, texture and shared
-memory requests, render-target updates, pipeline lookup, constant/descriptor
-updates, and deferred Vulkan recording. Do not ship skipped draws or infer that
-one sub-phase owns the full 58.7-point CPU ceiling.
+Retain the draw bypass solely as a negative-control tool and keep the project
+at 16 invalidation pages. The next implementation target is reducing redundant
+write-watch rearming or coalescing protection runs without widening uploaded
+dirty ranges and without violating the arm-before-copy race invariant. Before
+changing alias policy, collect multiple deterministic gameplay scenes because
+an alias with zero activity in one capture may be required elsewhere. Do not
+ship skipped draws or infer that one sampled sub-phase owns the full
+58.7-point CPU ceiling.
