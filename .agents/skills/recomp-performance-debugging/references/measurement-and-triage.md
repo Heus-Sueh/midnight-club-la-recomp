@@ -47,8 +47,10 @@ and follow the game child instead. On MCLA, load
 `scripts/gdb_hot_thread_sampler.py`, pass expected ReXGlue write-watch
 `SIGSEGV`, and use `hot-sample-once OUTPUT_CSV` after repeated short
 interruptions. First verify in the host CSV that one XThread remains dominant;
-the command intentionally selects the XThread with the greatest accumulated
-CPU time. Rank many samples rather than treating one stopped PC as a hotspot.
+the command selects the matching thread with the greatest accumulated CPU
+time. Its optional second argument chooses another name prefix, such as
+`hot-sample-once OUTPUT_CSV "GPU Commands"`. Rank many samples rather than
+treating one stopped PC as a hotspot.
 
 - Average FPS describes throughput but hides uneven delivery.
 - Median frame time describes the common frame.
@@ -98,6 +100,28 @@ progress outrank a synthetic FPS gain.
   of write-watch overhead. Correlate it with fault rates or a direct handled-
   fault counter before changing page protection; the sampled instruction may
   simply be inside genuinely hot guest logic.
+- On Linux, inspect the complete signal-handler stack when write-watch faults
+  are frequent. Repeated samples in `read`/`getline` under
+  `FindEntryForAddress` mean `MMIOHandler::ExceptionCallback` is scanning
+  `/proc/self/maps` per fault. The physical heap's write-watch bitmap is already
+  checked under the same global lock and its callback handles stale host
+  protection. Removing the redundant host protection query increased MCLA's
+  measured GPU occupancy from roughly 36% to 58% and moved a representative
+  gameplay range from 3.8–13.7 FPS to 19.5–29.8 FPS. Preserve an A/B capture
+  and test actual invalid-page faults before upstreaming this general SDK fix.
+- Audit work performed only to prepare disabled logs. A logging macro may gate
+  formatting correctly while a caller still performs an expensive lookup
+  before entering the macro. In ReXGlue's command processor,
+  `RegisterFile::GetRegisterInfo` was outside `REXGPU_DEBUG` and ran for every
+  register write. Gate both the lookup and the message on the GPU logger's
+  active debug level. When a packet writes a sequential range, prefer the
+  backend's existing bulk register API so its constant-buffer invalidation can
+  be coalesced; preserve the scalar path for repeated-single-register packets.
+- Re-profile after a large host-runtime fix. MCLA's former leading guest setter
+  pair fell from 54.5% to 30% of symbolized samples once Linux write-watch
+  overhead was removed. Native replacements, scheduler yields in a guest GPU
+  polling loop, and a smaller x86-64 code model all failed to deliver a stable
+  post-fix FPS gain. A previously hot PC is not a permanent optimization target.
 - A project strong-symbol wrapper can measure generated calls that cross
   translation units, but direct calls to a weak alias in the same generated
   translation unit may bind locally and bypass the wrapper. Treat a zero count

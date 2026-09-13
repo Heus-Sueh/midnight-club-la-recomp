@@ -54,9 +54,11 @@ The ReXGlue CLI will create part of this tree after an owned `game/default.xex` 
 ├── midnight_club_la_manifest.toml
 ├── config/                       # revision-specific codegen knowledge
 ├── docs/investigations/          # evidence and reproducible findings
+├── docs/reverse-engineering/     # public workflows, never proprietary exports
 ├── game/                         # gitignored user-owned dump
 ├── generated/                    # gitignored codegen output
 ├── patches/                      # focused, reproducible SDK patches
+├── scripts/ghidra/               # pinned headless RE toolchain and focused exports
 ├── scripts/extract_xex.py        # dependency-free XDVDFS XEX extractor
 ├── src/
 │   ├── main.cpp
@@ -92,6 +94,9 @@ Do not create fake XEX-derived config or placeholder guest addresses. Paths that
 - Build or statically validate both Windows and Linux paths for shared changes; explain unavailable runtime coverage.
 - Confirm Vulkan ON/D3D12 OFF rather than assuming platform defaults.
 - For address-bearing changes, include the module and compatible executable hash/revision.
+- Keep Ghidra installations, projects, databases, bulk disassembly, and
+  decompiler exports under ignored `.tools/` and `.ghidra/`; commit only concise
+  findings and original automation scripts.
 - For hooks, document register/memory contracts and preserved control flow.
 - Keep logs free of user paths, keys, and proprietary byte dumps before sharing.
 

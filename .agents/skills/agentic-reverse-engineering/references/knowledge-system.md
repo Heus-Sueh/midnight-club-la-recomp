@@ -18,6 +18,31 @@ Prefer narrow headless exports and query tools such as:
 An agent should request additional context only when the current evidence cannot
 answer the hypothesis. Avoid loading thousands of unrelated assembly lines.
 
+For this repository, use `scripts/ghidra/bootstrap.py` to obtain the pinned
+Ghidra/JDK/XEXLoaderWV combination and `scripts/ghidra/analyze_xex.py` for
+hash-keyed projects and focused exports. Keep both `.tools/` and `.ghidra/`
+ignored. Pin the loader and Ghidra as a compatible pair: extension metadata may
+allow a nearby version while its compiled APIs do not. Verify every downloaded
+archive before extraction and reject archive path traversal.
+
+The XEX loader's PowerPC model and decompiler output are hypotheses, especially
+around Xenon VMX128 instructions. Correlate each optimization target with
+ReXGlue's generated C++, runtime hit/timing evidence, and—when correctness is
+uncertain—focused PPC semantic tests. A visually plausible decompilation is not
+sufficient proof for a native replacement.
+
+XEXLoaderWV may print derived retail file/session keys during import. Always run
+it through the repository wrapper, which redacts console output, and treat its
+ignored application log as sensitive. Never paste or commit raw loader logs.
+Python ZIP extraction also drops Unix executable bits; the bootstrap verifier
+repairs Ghidra launch scripts and ELF analyzer helpers before headless use.
+
+XEXLoaderWV's `.pdata` pass may leave an Xbox 360 function at an 8-byte body
+when its `mflr`/`bl __savegprlr_*` prologue is modeled as non-returning. For a
+focused function, use the next same-revision `.pdata` function entry as an
+exclusive upper bound, disassemble from `entry + 8`, and record that the local
+body was repaired. Never infer such a range from a different executable hash.
+
 ## Versioned knowledge layer
 
 Create `re/` data only as real evidence becomes available. A useful shape is:

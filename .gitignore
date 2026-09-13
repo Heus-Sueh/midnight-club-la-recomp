@@ -9,6 +9,8 @@
 /out/
 /build/
 /.venv/
+/.tools/
+/.ghidra/
 
 # Python test caches.
 __pycache__/

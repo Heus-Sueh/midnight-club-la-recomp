@@ -175,32 +175,106 @@ Because the repeated samples landed on guest stores, the host profiler was
 extended with process and hottest-thread minor/major fault rates. In settled
 gameplay (35 seconds onward), process minor faults averaged 156.6/s, but the
 dominant XThread averaged only 1.9/s (57.7/s maximum), with zero major faults.
-This does not support page faults or GPU write-watch as the primary source of
-the saturated guest core. Linux procfs counters are supporting negative
-evidence, not a direct count of ReXGlue's handled protection signals.
+This did not initially support page faults as the primary source because Linux
+procfs minor-fault counters do not count handled protection signals reliably.
+The counters were supporting negative evidence, not a direct count of
+ReXGlue's write-watch exceptions.
+
+## Linux write-watch root cause and fix
+
+A complete GDB stack, rather than the stopped guest PC alone, later exposed the
+actual host work beneath the same hot path:
+
+```text
+read -> std::getline -> rex::memory::FindEntryForAddress
+  -> rex::memory::QueryProtect -> MMIOHandler::ExceptionCallback
+  -> signal delivery -> sub_82415EE8
+```
+
+On Linux, `QueryProtect` opened and scanned `/proc/self/maps` for every GPU
+write-watch exception. `Memory::AccessViolationCallback` already checks the
+physical heap's authoritative write-watch bitmap while holding the same global
+lock, and it repairs stale page protection when another thread has cleared the
+watch. The redundant host mapping query was removed on Linux only; Windows
+retains its inexpensive `VirtualQuery` race check. The change is stored as
+`patches/rexglue-linux-write-watch-fastpath.patch`.
+
+In the same manually entered gameplay path, this moved the observed
+presentation range from approximately 3.8–13.7 FPS to 18.3–29.8 FPS and GPU
+occupancy from roughly 36% to 56–59%. Several stale-protection recoveries were
+logged, but there was no fatal memory error or crash. This is the largest
+measured improvement in the investigation.
+
+## Post-fix GPU command processing
+
+After the write-watch fix, `GPU Commands` became the hottest host thread in a
+substantial fraction of samples. GDB repeatedly found
+`RegisterFile::GetRegisterInfo` below `CommandProcessor::WriteRegister`. The
+metadata lookup was executed for every register write solely to decide whether
+to emit a debug message, even when GPU debug logging was disabled. The focused
+command-processor patch now gates the lookup on the logger's debug level.
+
+Sequential Type-0 packets now use the existing virtual
+`WriteRegisterRangeFromRing` path. This lets the Vulkan backend bulk-copy float,
+bool/loop, and fetch constants while preserving the original per-write path for
+packets that repeatedly target one register. In comparable 25–75 second host
+windows, these changes reduced process CPU from 387.9% to 360.4–366.4% and
+kept GPU occupancy near 61%. The manual scene variance is too large to claim a
+precise FPS delta, but builds and repeated gameplay smoke tests showed no
+correctness regression.
+
+## Updated target selection with Ghidra
+
+A fresh 40-sample guest-thread profile after the SDK fixes produced:
+
+- `0x82415DC8`: 7 samples;
+- `0x8219A7D0`: 6;
+- `0x82412F98`: 6;
+- `0x82415EE8`: 5;
+- `0x82411E98`: 3;
+- `0x8244FEC8`: 3.
+
+Focused Ghidra exports identified `0x82411E98` as a loop waiting for graphics
+queue progress and `0x82412F98` as its polling helper. `0x8219A7D0` updates a
+12-byte indexed object record and appends an 8-byte submission record. Complete
+GDB stacks connect both groups to the main render traversal. The hotspots are
+now distributed rather than dominated by one function.
+
+Controlled negative experiments were removed rather than shipped:
+
+- native replacements for `0x82415DC8`/`0x82415EE8` produced no measurable
+  improvement after the write-watch fix;
+- yielding after a positive `0x82412F98` poll reduced GPU occupancy to 52.6%
+  and gameplay fell to 18.8–22.2 FPS late in the capture;
+- a native equivalent of `0x8219A7D0` produced a 23.5 FPS late-window mean;
+- the x86-64 small code model linked and reduced the executable from 72 to
+  67 MiB, but its measured windows still ranged from 19.9 to 30.0 FPS.
 
 ## Conclusion and confidence
 
-High confidence: the current race path is CPU-bound and not limited by Vulkan
-GPU occupancy, persistent pipeline compilation, native presentation pacing, or
-the measured texture-cache global lock.
+High confidence: the original severe regression was dominated by a redundant
+Linux host-memory query in ReXGlue's write-watch handler. After fixing it, the
+race path is a mixed bottleneck between the primary guest XThread and Vulkan
+command processing, not persistent pipeline compilation, native presentation
+pacing, or the measured texture-cache global lock.
 
 High confidence: `sub_82415DC8` and `sub_82415EE8`, especially their common
 command/state-record path, are a significant part of the dominant guest
 thread's cost. Statistical sampling and inclusive timing agree.
 
-Low confidence: the guest store at offset `+13524` itself is expensive. The PC
-concentration may reflect surrounding work or sampling behavior, so invocation
-and inclusive-time counters are still required.
+High confidence: optimizing one sampled guest helper in isolation is
+insufficient. Three semantics-preserving local experiments failed to produce a
+repeatable throughput improvement after the host fix.
 
 ## Validation level and next target
 
 Reached smoke gameplay plus repeatable host profiling and one controlled
 negative test. This is not extended gameplay or a deterministic benchmark.
 
-Next, identify the state-record format emitted by `sub_82415DC8` and
-`sub_82415EE8`, then measure how often their cursor-full path enters
-`sub_8241A630`. A semantics-preserving native replacement or redundant-state
-elision has enough potential benefit to investigate, but it must retain record
-ordering and dirty-state behavior. Do not relax memory watches or
-synchronization: the measurements do not support either change.
+Next, create a deterministic gameplay input/replay window before making another
+throughput claim, then measure queue depth and wait duration around
+`0x82411E98` together with GPU command-buffer submission/completion. The goal is
+to distinguish guest command production, backend translation, and driver
+execution without changing synchronization semantics. Do not add another
+single-function native replacement unless the synchronized trace establishes
+an optimization ceiling large enough to reach 30 FPS.

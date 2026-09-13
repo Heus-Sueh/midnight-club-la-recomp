@@ -4,9 +4,12 @@ Load this file with ``gdb -x scripts/gdb_hot_thread_sampler.py``. While the
 inferior is stopped, run ``hot-sample-once OUTPUT_CSV`` and then continue.
 Repeated short interrupt/sample/continue cycles form a statistical profile.
 
-The command selects the XThread with the largest accumulated Linux user plus
-system CPU time. This is appropriate after a gameplay warm-up when one guest
-thread is known to remain dominant; verify that assumption with the host CSV.
+The optional second argument selects another thread-name prefix, for example
+``hot-sample-once OUTPUT_CSV "GPU Commands"``.
+
+The command selects the matching thread with the largest accumulated Linux
+user plus system CPU time. The default prefix is ``XThread``. Verify the chosen
+thread class with the host CSV before interpreting samples.
 """
 
 import csv
@@ -16,7 +19,7 @@ from pathlib import Path
 import gdb
 
 
-def _thread_cpu_ticks(pid):
+def _thread_cpu_ticks(pid, name_prefix):
     stats = []
     task_root = Path(f"/proc/{pid}/task")
     for task_dir in task_root.iterdir():
@@ -24,7 +27,7 @@ def _thread_cpu_ticks(pid):
             tid = int(task_dir.name)
             name = (task_dir / "comm").read_text(encoding="utf-8").strip()
             fields = (task_dir / "stat").read_text(encoding="utf-8").split()
-            if name.startswith("XThread"):
+            if name.startswith(name_prefix):
                 stats.append((int(fields[13]) + int(fields[14]), tid, name))
         except (FileNotFoundError, ProcessLookupError, ValueError):
             continue
@@ -39,7 +42,7 @@ def _gdb_thread_for_tid(tid):
 
 
 class HotThreadSampleOnce(gdb.Command):
-    """Append one hottest-XThread sample: hot-sample-once OUTPUT_CSV."""
+    """Append one matching-thread sample: hot-sample-once OUTPUT_CSV [NAME_PREFIX]."""
 
     def __init__(self):
         super().__init__("hot-sample-once", gdb.COMMAND_USER)
@@ -47,15 +50,18 @@ class HotThreadSampleOnce(gdb.Command):
     def invoke(self, argument, from_tty):
         del from_tty
         args = gdb.string_to_argv(argument)
-        if len(args) != 1:
-            raise gdb.GdbError("usage: hot-sample-once OUTPUT_CSV")
+        if len(args) not in (1, 2):
+            raise gdb.GdbError("usage: hot-sample-once OUTPUT_CSV [NAME_PREFIX]")
+        name_prefix = args[1] if len(args) == 2 else "XThread"
 
         inferior = gdb.selected_inferior()
         if not inferior.is_valid() or inferior.pid == 0:
             raise gdb.GdbError("no stopped inferior is available")
-        candidates = _thread_cpu_ticks(inferior.pid)
+        candidates = _thread_cpu_ticks(inferior.pid, name_prefix)
         if not candidates:
-            raise gdb.GdbError("the inferior has no Linux thread named XThread*")
+            raise gdb.GdbError(
+                f"the inferior has no Linux thread beginning with {name_prefix!r}"
+            )
 
         cpu_ticks, tid, thread_name = max(candidates)
         thread = _gdb_thread_for_tid(tid)
@@ -77,8 +83,12 @@ class HotThreadSampleOnce(gdb.Command):
         with output_path.open("a", encoding="utf-8", newline="") as output:
             writer = csv.writer(output)
             if needs_header:
-                writer.writerow(["tid", "thread_name", "cpu_ticks", "pc", "function", "source"])
-            writer.writerow([tid, thread_name, cpu_ticks, f"0x{pc:X}", function, source])
+                writer.writerow(
+                    ["requested_prefix", "tid", "thread_name", "cpu_ticks", "pc", "function", "source"]
+                )
+            writer.writerow(
+                [name_prefix, tid, thread_name, cpu_ticks, f"0x{pc:X}", function, source]
+            )
 
         gdb.write(
             f"sample: {thread_name} tid={tid} ticks={cpu_ticks} "

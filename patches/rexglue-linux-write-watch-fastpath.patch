@@ -1,0 +1,33 @@
+diff --git a/src/system/mmio_handler.cpp b/src/system/mmio_handler.cpp
+index 2b93005..774d0d0 100644
+--- a/src/system/mmio_handler.cpp
++++ b/src/system/mmio_handler.cpp
+@@ -402,10 +402,17 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
+     }
+   }
+   if (!range) {
+-    // Recheck if the pages are still protected (race condition - another thread
+-    // clears the watch we just hit).
+-    // Do this under the lock so we don't introduce another race condition.
+     auto lock = global_critical_region_.Acquire();
++#if REX_PLATFORM_LINUX
++    // The access-violation callback owns the authoritative physical write-watch
++    // bitmap and checks it while this same lock is held. QueryProtect opens and
++    // scans /proc/self/maps on Linux for every GPU write-watch fault. The
++    // callback also repairs stale host protection after another thread clears a
++    // watch, so the host mapping query is redundant on this platform.
++#else
++    // Recheck if the pages are still protected (race condition - another thread
++    // clears the watch we just hit). Do this under the lock so we don't
++    // introduce another race condition. QueryProtect is cheap on Windows.
+     memory::PageAccess cur_access;
+     size_t page_length = memory::page_size();
+     memory::QueryProtect(fault_host_address, page_length, cur_access);
+@@ -414,6 +421,7 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
+       // Another thread has cleared this watch. Abort.
+       return true;
+     }
++#endif
+     // The address is not found within any range, so either a write watch or an
+     // actual access violation.
+     if (access_violation_callback_) {

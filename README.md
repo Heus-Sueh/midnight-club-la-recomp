@@ -43,6 +43,11 @@ Git.
   removed after controlled tests showed severe regressions. Only the reviewed
   presenter hook at `0x8241A0E4` remains, providing telemetry and host pacing
   without changing guest simulation.
+- Linux gameplay no longer scans `/proc/self/maps` on every GPU write-watch
+  fault. The focused SDK patch raised the tested race path from roughly
+  4–14 FPS to 18–30 FPS and GPU occupancy from about 36% to 58%. Gameplay is
+  substantially faster but is not yet a constant 30 FPS; see the current
+  investigation report for the remaining mixed guest/GPU-command bottleneck.
 
 ReXGlue currently reports 20 `Unexpected float16_4 pack instruction` warnings
 during code generation. Treat them as a known correctness risk until those PPC
@@ -54,7 +59,8 @@ Analyze comparable presentation logs without ad-hoc parsing:
 python scripts/analyze_present_log.py /path/to/run.log --warmup-seconds 5
 ```
 
-The tool reports average FPS, median, p95/p99, maximum interval and hitch counts.
+The tool reports exact interval percentiles when per-present events exist and
+falls back to the project's five-second NativeRenderer FPS windows otherwise.
 The current controlled baseline and its limitations are recorded in
 `docs/investigations/performance-baseline-2026-09-07.md`.
 
@@ -71,6 +77,21 @@ The CSV includes process and hottest-thread CPU, page-fault rates, AMD GPU
 occupancy, VRAM, RSS, and thread identity. The current gameplay bottleneck
 investigation and GDB guest-thread sampling procedure are documented in
 `docs/investigations/gameplay-cpu-bottleneck-2026-09-12.md`.
+
+For focused static analysis, install the pinned local Ghidra 12.0.4,
+XEXLoaderWV 13.0.0, and portable JDK 21 toolchain, then import the owned XEX
+and export only the functions under investigation:
+
+```sh
+python scripts/ghidra/bootstrap.py
+python scripts/ghidra/analyze_xex.py \
+  --address 0x82415DC8 --address 0x82415EE8 --address 0x8241A630
+```
+
+The downloads are SHA-256 verified. Tool binaries, Ghidra projects, and
+XEX-derived exports stay in ignored `.tools/` and `.ghidra/` directories.
+See `docs/reverse-engineering/ghidra.md` for Windows usage and the evidence
+handling rules.
 
 To build the diagnostic guest-hotspot wrappers described in that report:
 
@@ -99,6 +120,8 @@ git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-posix-shm-unlink.patch
 git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-vulkan-shader-dump.patch
 git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-vulkan-performance-stability.patch
 git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-texture-cache-profiling.patch
+git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-linux-write-watch-fastpath.patch
+git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-gpu-register-logging-fastpath.patch
 ```
 
 ## Extract the game
