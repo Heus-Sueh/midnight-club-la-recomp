@@ -20,6 +20,11 @@ clock_source_raw = false
 async_shader_compilation = true
 vulkan_pipeline_creation_threads = 4
 
+# Limit excess write-watch invalidation to 64 KiB on 4 KiB-page hosts. This
+# reduces repeated shared-memory reuploads in MCLA. Restore 64 first when
+# diagnosing memory coherence or scene-specific corruption.
+shared_memory_access_invalidation_pages = 16
+
 
 # Do not drop entire frames while async placeholder shaders are compiling
 vulkan_async_skip_incomplete_frames = true

@@ -1,0 +1,74 @@
+diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
+index 4d85a2b..c12f81b 100644
+--- a/include/rex/graphics/shared_memory.h
++++ b/include/rex/graphics/shared_memory.h
+@@ -147,6 +147,7 @@ class SharedMemory {
+   // on it is not hard - the access callback takes a range as an argument, and
+   // touched pages of the buffer of this size will be invalidated).
+   uint32_t page_size_log2_;
++  uint32_t access_invalidation_page_limit_ = 64;
+ 
+   bool EnsureHostGpuMemoryAllocated(uint32_t start, uint32_t length);
+   uint32_t host_gpu_memory_sparse_granularity_log2_ = UINT32_MAX;
+diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
+index ec0df7c..1c6b459 100644
+--- a/src/graphics/shared_memory.cpp
++++ b/src/graphics/shared_memory.cpp
+@@ -15,11 +15,17 @@
+ 
+ #include <rex/assert.h>
+ #include <rex/bit.h>
++#include <rex/cvar.h>
+ #include <rex/dbg.h>
+ #include <rex/graphics/shared_memory.h>
+ #include <rex/math.h>
+ #include <rex/memory.h>
+ 
++REXCVAR_DEFINE_INT32(
++    shared_memory_access_invalidation_pages, 64, "GPU",
++    "Maximum aligned page span invalidated by a physical-memory access callback")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ namespace rex::graphics {
+ 
+ SharedMemory::SharedMemory(memory::Memory& memory) : memory_(memory) {
+@@ -31,6 +37,8 @@ SharedMemory::~SharedMemory() {
+ }
+ 
+ void SharedMemory::InitializeCommon() {
++  access_invalidation_page_limit_ = uint32_t(
++      std::clamp(REXCVAR_GET(shared_memory_access_invalidation_pages), int32_t(1), int32_t(64)));
+   num_system_page_flags_ = ((kBufferSize >> page_size_log2_) + 63) / 64;
+   system_page_flags_valid_.assign(num_system_page_flags_, 0);
+   system_page_flags_valid_and_gpu_written_.assign(num_system_page_flags_, 0);
+@@ -489,6 +497,8 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+ 
+   uint32_t page_first = physical_address_start >> page_size_log2_;
+   uint32_t page_last = physical_address_last >> page_size_log2_;
++  const uint32_t requested_page_first = page_first;
++  const uint32_t requested_page_last = page_last;
+   uint32_t block_first = page_first >> 6;
+   uint32_t block_last = page_last >> 6;
+ 
+@@ -514,6 +524,21 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+       page_last =
+           (page_last & ~uint32_t(63)) + (std::max(rex::tzcnt(gpu_written_end), uint8_t(1)) - 1);
+     }
++    // Keep the requested pages, but bound excess invalidation to an aligned
++    // window. The default of 64 preserves the original 256 KB behavior on
++    // hosts with 4 KB pages. Requests crossing a window boundary remain exact
++    // because expanding them into either adjacent window would exceed the
++    // configured limit.
++    const uint32_t limit = access_invalidation_page_limit_;
++    const uint32_t window_first = (requested_page_first / limit) * limit;
++    const uint32_t window_last = window_first + limit - 1;
++    if (requested_page_last <= window_last) {
++      page_first = std::max(page_first, window_first);
++      page_last = std::min(page_last, window_last);
++    } else {
++      page_first = requested_page_first;
++      page_last = requested_page_last;
++    }
+   }
+ 
+   for (uint32_t i = block_first; i <= block_last; ++i) {

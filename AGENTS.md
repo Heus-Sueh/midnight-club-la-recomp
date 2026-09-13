@@ -89,6 +89,9 @@ Do not create fake XEX-derived config or placeholder guest addresses. Paths that
 
 ## Definition of done for changes
 
+- Prefer the root `justfile` for repeated build, plugin staging, extraction and
+  capture/analysis tasks. Keep recipes thin wrappers over the existing scripts
+  and CMake presets; retain Windows/Linux support and document host-only tasks.
 - State which phase gate the change advances.
 - Include commands run and concise observable evidence.
 - Build or statically validate both Windows and Linux paths for shared changes; explain unavailable runtime coverage.

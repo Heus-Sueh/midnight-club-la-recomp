@@ -111,6 +111,45 @@ comparisons.
 - Clang 20 or newer
 - A Vulkan-capable driver and GPU
 
+## Repeated tasks with just
+
+Optionally install [just](https://github.com/casey/just#installation). The root
+`justfile` uses the host's Release preset and keeps CMake as the build system:
+
+```sh
+just --list
+just configure
+just build
+just run
+just profile /tmp/mcla-host.csv 60
+just analyze-profile /tmp/mcla-host.csv 25
+just analyze-present /path/to/run.log 25
+just analyze-queue /path/to/run.log
+just analyze-memory /path/to/run.log
+```
+
+`profile` is Linux-only; the build, extraction and analysis recipes also support
+Windows. Override tools or presets with, for example,
+`just python=python3 preset=linux-amd64-relwithdebinfo build`.
+`build` refreshes the exact GPU plugin identified by the selected Ninja build,
+including when an SDK-only change does not relink the executable. Configure
+before the first build. `config-reset` restores the checked-in runtime settings
+beside the executable after an experiment. Run it only after recording any
+local settings you want to keep.
+
+The project selects 16 pages for `shared_memory_access_invalidation_pages`.
+The SDK default remains 64; restore 64 first when investigating visual
+corruption, missing GPU-written data, or a scene-specific regression.
+
+For write-watch diagnostics, set `physical_access_profile = true` and
+`log_level = "info"` in the executable-local TOML before launching. The probe
+defaults to off and requires a restart. It logs cumulative counters every
+65,536 enable calls per alias; `analyze-memory` needs two snapshots per alias
+and uses last minus first. These are callback counters, not exclusively CPU
+faults. Diagnostic captures do not establish an uninstrumented FPS gain.
+
+## SDK setup
+
 Clone the pinned SDK with its submodules:
 
 ```sh
@@ -125,6 +164,9 @@ git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-gpu-register-logging-f
 git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-vulkan-submission-diagnostics.patch
 git -C thirdparty/rexglue-sdk apply --unidiff-zero \
   ../../patches/rexglue-vulkan-shared-memory-profiling.patch
+git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-physical-access-profiling.patch
+git -C thirdparty/rexglue-sdk apply \
+  ../../patches/rexglue-shared-memory-invalidation-granularity.patch
 ```
 
 ## Extract the game

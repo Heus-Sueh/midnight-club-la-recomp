@@ -154,3 +154,27 @@ progress outrank a synthetic FPS gain.
   while preserving the invariant that the watch is armed before CPU-to-GPU
   copying. Use the project's default-off shared-memory profiling patch for
   target selection, not final FPS comparison.
+- Before optimizing write-watch alias handling, count actual protection runs
+  and callback range expansion per alias. An alias receiving every enable call
+  may perform no protection in one capture; that does not prove it is unused
+  by all scenes. MCLA's A0000000 alias dominated protection and expanded
+  one-page callback requests to about 64 pages. See
+  `docs/investigations/physical-access-profile-2026-09-13.md` for revision,
+  configuration and limitations. Test narrower invalidation against increased
+  fault frequency before keeping a change; never remove alias tracking based
+  on a single run.
+- Fault-side diagnostics must avoid clocks, allocation and logger calls. Cache
+  the opt-in flag during initialization, update counters under the existing
+  memory lock, and report snapshots from the non-fault enable path. Callback
+  counts are not necessarily protection-fault counts. Analyze cumulative logs
+  with `just analyze-memory`; reject counter resets instead of subtracting
+  unrelated process runs.
+- Treat invalidation breadth as a workload-specific trade-off, not a universal
+  smaller-is-better rule. In MCLA fresh-launch captures, narrowing shared-memory
+  access invalidation from 64 to 16 pages roughly halved protection calls and
+  reduced protected pages by over 60%, while callbacks rose 23-31%. Two
+  diagnostics-on pairs and one diagnostics-off pair favored 16 pages, but the
+  clean mean gain was only 0.34 FPS and gameplay was not visually confirmed.
+  Keep the SDK default conservative, place a reversible override in the game
+  configuration, and require a deterministic driving route plus a longer
+  corruption soak before treating it as broadly validated.

@@ -1,0 +1,2 @@
+# Unified diff context may legitimately contain a single prefix space.
+*.patch -whitespace
