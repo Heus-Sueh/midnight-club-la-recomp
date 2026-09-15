@@ -1,0 +1,500 @@
+diff --git i/src/graphics/pipeline/render_target/cache.cpp w/src/graphics/pipeline/render_target/cache.cpp
+index 953c5fd..7c8a287 100644
+--- i/src/graphics/pipeline/render_target/cache.cpp
++++ w/src/graphics/pipeline/render_target/cache.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <cmath>
+ #include <cstring>
+ #include <iterator>
+@@ -41,8 +42,36 @@ REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
+                     "Resolve from host render targets directly to shared memory when possible")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(render_target_cache_profile, false, "GPU",
++                    "Log generic render-target cache counters and timings every 65536 updates")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ namespace rex::graphics {
+ 
++namespace {
++
++struct RenderTargetCacheProfile {
++  uint64_t updates = 0;
++  uint64_t failures = 0;
++  uint64_t no_render_target_updates = 0;
++  uint64_t used_render_targets = 0;
++  uint64_t new_render_targets = 0;
++  uint64_t last_binding_hits = 0;
++  uint64_t last_binding_misses = 0;
++  uint64_t accumulation_resets = 0;
++  uint64_t selection_ns = 0;
++  uint64_t no_render_target_ns = 0;
++  uint64_t height_ns = 0;
++  uint64_t prepare_ns = 0;
++  uint64_t ownership_ns = 0;
++  uint64_t bindings_ns = 0;
++  uint64_t total_ns = 0;
++};
++
++thread_local RenderTargetCacheProfile render_target_cache_profile_stats;
++
++}  // namespace
++
+ void RenderTargetCache::GetPSIColorFormatInfo(xenos::ColorRenderTargetFormat format,
+                                               uint32_t write_mask, float& clamp_rgb_low,
+                                               float& clamp_alpha_low, float& clamp_rgb_high,
+@@ -400,6 +429,37 @@ void RenderTargetCache::BeginFrame() {
+ bool RenderTargetCache::Update(bool is_rasterization_done,
+                                reg::RB_DEPTHCONTROL normalized_depth_control,
+                                uint32_t normalized_color_mask, const Shader& vertex_shader) {
++  static const bool profile = REXCVAR_GET(render_target_cache_profile);
++  using ProfileClock = std::chrono::steady_clock;
++  const auto update_started = profile ? ProfileClock::now() : ProfileClock::time_point{};
++  if (profile) {
++    ++render_target_cache_profile_stats.updates;
++  }
++  const auto report_profile = [&]() {
++    if (!profile || render_target_cache_profile_stats.updates != 65536) {
++      return;
++    }
++    const auto& stats = render_target_cache_profile_stats;
++    REXGPU_INFO(
++        "RenderTargetCacheProfile updates={} failures={} no_render_target_updates={} "
++        "used_render_targets={} new_render_targets={} last_binding_hits={} "
++        "last_binding_misses={} accumulation_resets={} selection_ns={} no_render_target_ns={} "
++        "height_ns={} prepare_ns={} ownership_ns={} bindings_ns={} total_ns={}",
++        stats.updates, stats.failures, stats.no_render_target_updates, stats.used_render_targets,
++        stats.new_render_targets, stats.last_binding_hits, stats.last_binding_misses,
++        stats.accumulation_resets, stats.selection_ns, stats.no_render_target_ns, stats.height_ns,
++        stats.prepare_ns, stats.ownership_ns, stats.bindings_ns, stats.total_ns);
++    render_target_cache_profile_stats = {};
++  };
++  const auto finish_profile = [&]() {
++    if (profile) {
++      render_target_cache_profile_stats.total_ns +=
++          std::chrono::duration_cast<std::chrono::nanoseconds>(ProfileClock::now() - update_started)
++              .count();
++    }
++    report_profile();
++  };
++
+   const RegisterFile& regs = register_file();
+   bool interlock_barrier_only = GetPath() == Path::kPixelShaderInterlock;
+ 
+@@ -411,6 +471,10 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+     assert_always();
+     REXGPU_ERROR("{}x MSAA requested by the guest, Xenos only supports up to 4x",
+                  uint32_t(1) << uint32_t(msaa_samples));
++    if (profile) {
++      ++render_target_cache_profile_stats.failures;
++    }
++    finish_profile();
+     return false;
+   }
+   uint32_t msaa_samples_x_log2 = uint32_t(msaa_samples >= xenos::MsaaSamples::k4X);
+@@ -425,6 +489,10 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+         "Surface pitch {} larger than the maximum texture width {} specified "
+         "by the guest",
+         pitch_pixels, xenos::kTexture2DCubeMaxWidthHeight);
++    if (profile) {
++      ++render_target_cache_profile_stats.failures;
++    }
++    finish_profile();
+     return false;
+   }
+   uint32_t pitch_tiles_at_32bpp =
+@@ -446,6 +514,10 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+           "Surface pitch aligned to EDRAM tiles and resolution-scaled {} "
+           "larger than the maximum host render target width {}",
+           pitch_pixels_tile_aligned_scaled, max_render_target_width);
++      if (profile) {
++        ++render_target_cache_profile_stats.failures;
++      }
++      finish_profile();
+       return false;
+     }
+   }
+@@ -539,6 +611,13 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+     }
+   }
+ 
++  const auto selection_finished = profile ? ProfileClock::now() : ProfileClock::time_point{};
++  if (profile) {
++    render_target_cache_profile_stats.selection_ns +=
++        std::chrono::duration_cast<std::chrono::nanoseconds>(selection_finished - update_started)
++            .count();
++  }
++
+   if (!depth_and_color_rts_used_bits) {
+     // Nothing to bind, don't waste time on things like memexport-only draws -
+     // just check if old bindings can still be used.
+@@ -561,6 +640,14 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+       std::memset(last_update_accumulated_render_targets_, 0,
+                   sizeof(last_update_accumulated_render_targets_));
+     }
++    if (profile) {
++      ++render_target_cache_profile_stats.no_render_target_updates;
++      render_target_cache_profile_stats.no_render_target_ns +=
++          std::chrono::duration_cast<std::chrono::nanoseconds>(ProfileClock::now() -
++                                                               selection_finished)
++              .count();
++    }
++    finish_profile();
+     return true;
+   }
+ 
+@@ -573,6 +660,12 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+                        ? REXCVAR_GET(execute_unclipped_draw_vs_on_cpu_for_psi_render_backend)
+                        : true,
+                    vertex_shader));
++  const auto height_finished = profile ? ProfileClock::now() : ProfileClock::time_point{};
++  if (profile) {
++    render_target_cache_profile_stats.height_ns +=
++        std::chrono::duration_cast<std::chrono::nanoseconds>(height_finished - selection_finished)
++            .count();
++  }
+ 
+   // Sorted by EDRAM base and then by index in the pipeline - for simplicity,
+   // treat render targets placed closer to the end of the EDRAM as truncating
+@@ -594,6 +687,9 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+         std::make_pair(edram_bases[rt_index], rt_index);
+   }
+   std::sort(edram_bases_sorted, edram_bases_sorted + edram_bases_sorted_count);
++  if (profile) {
++    render_target_cache_profile_stats.used_render_targets += edram_bases_sorted_count;
++  }
+   // "As if it was 64bpp" (contribution of 32bpp render targets multiplied by 2,
+   // and clamping for 32bpp render targets divides this by 2) because 32bpp
+   // render targets can be combined with twice as long 64bpp render targets. An
+@@ -640,8 +736,31 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+     rt_key.is_depth = rt_bit_index == 0;
+     rt_key.resource_format = resource_formats[rt_bit_index];
+     if (!interlock_barrier_only) {
++      const size_t render_target_count_before = render_targets_.size();
++      if (profile && are_accumulated_render_targets_valid_) {
++        RenderTarget* last_binding = last_update_accumulated_render_targets_[rt_bit_index];
++        if (last_binding && last_binding->key() == rt_key) {
++          ++render_target_cache_profile_stats.last_binding_hits;
++        } else {
++          ++render_target_cache_profile_stats.last_binding_misses;
++        }
++      } else if (profile) {
++        ++render_target_cache_profile_stats.last_binding_misses;
++      }
+       RenderTarget* render_target = GetOrCreateRenderTarget(rt_key);
++      if (profile) {
++        render_target_cache_profile_stats.new_render_targets +=
++            render_targets_.size() - render_target_count_before;
++      }
+       if (!render_target) {
++        if (profile) {
++          ++render_target_cache_profile_stats.failures;
++          render_target_cache_profile_stats.prepare_ns +=
++              std::chrono::duration_cast<std::chrono::nanoseconds>(ProfileClock::now() -
++                                                                   height_finished)
++                  .count();
++        }
++        finish_profile();
+         return false;
+       }
+       rts[rt_bit_index] = render_target;
+@@ -658,6 +777,13 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+                                        rt_base);
+   }
+ 
++  const auto prepare_finished = profile ? ProfileClock::now() : ProfileClock::time_point{};
++  if (profile) {
++    render_target_cache_profile_stats.prepare_ns +=
++        std::chrono::duration_cast<std::chrono::nanoseconds>(prepare_finished - height_finished)
++            .count();
++  }
++
+   if (interlock_barrier_only) {
+     // Because a full pixel shader interlock barrier may clear the ownership map
+     // (since it flushes all previous writes, and there's no need for another
+@@ -690,8 +816,16 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+                     interlock_barrier_only ? nullptr : &last_update_transfers_[rt_bit_index]);
+   }
+ 
++  const auto ownership_finished = profile ? ProfileClock::now() : ProfileClock::time_point{};
++  if (profile) {
++    render_target_cache_profile_stats.ownership_ns +=
++        std::chrono::duration_cast<std::chrono::nanoseconds>(ownership_finished - prepare_finished)
++            .count();
++  }
++
+   if (interlock_barrier_only) {
+     // No copying transfers or render target bindings - only needed the barrier.
++    finish_profile();
+     return true;
+   }
+ 
+@@ -756,8 +890,18 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+     std::memcpy(last_update_accumulated_render_targets_, last_update_used_render_targets_,
+                 sizeof(last_update_accumulated_render_targets_));
+     are_accumulated_render_targets_valid_ = true;
++    if (profile) {
++      ++render_target_cache_profile_stats.accumulation_resets;
++    }
+   }
+ 
++  if (profile) {
++    render_target_cache_profile_stats.bindings_ns +=
++        std::chrono::duration_cast<std::chrono::nanoseconds>(ProfileClock::now() -
++                                                             ownership_finished)
++            .count();
++  }
++  finish_profile();
+   return true;
+ }
+ 
+diff --git i/src/graphics/vulkan/render_target_cache.cpp w/src/graphics/vulkan/render_target_cache.cpp
+index 0298f06..ebda248 100644
+--- i/src/graphics/vulkan/render_target_cache.cpp
++++ w/src/graphics/vulkan/render_target_cache.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <chrono>
+ #include <cstddef>
+ #include <cstdint>
+ #include <cstring>
+@@ -41,6 +42,10 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
+                       "Vulkan render target implementation path")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ 
++REXCVAR_DEFINE_BOOL(vulkan_render_target_profile, false, "GPU/Vulkan",
++                    "Log render-target update counters and phase timings every 65536 calls")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ // DEFINE_string(
+ //     render_target_path_vulkan, "",
+ //     "Render target emulation path to use on Vulkan.\n"
+@@ -64,6 +69,33 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
+ 
+ namespace rex::graphics::vulkan {
+ 
++namespace {
++
++struct RenderTargetUpdateProfile {
++  uint64_t updates = 0;
++  uint64_t failures = 0;
++  uint64_t host_updates = 0;
++  uint64_t fsi_updates = 0;
++  uint64_t transfer_updates = 0;
++  uint64_t transfers = 0;
++  uint64_t transfer_tiles = 0;
++  uint64_t last_render_pass_hits = 0;
++  uint64_t last_render_pass_misses = 0;
++  uint64_t framebuffer_lookups = 0;
++  uint64_t framebuffer_cache_hits = 0;
++  uint64_t framebuffer_creates = 0;
++  uint64_t barriers = 0;
++  uint64_t base_ns = 0;
++  uint64_t transfers_ns = 0;
++  uint64_t setup_ns = 0;
++  uint64_t barriers_ns = 0;
++  uint64_t total_ns = 0;
++};
++
++thread_local RenderTargetUpdateProfile render_target_update_profile;
++
++}  // namespace
++
+ // Generated with `xb buildshaders`.
+ namespace shaders {
+ #include "../shaders/vulkan_spirv/host_depth_store_1xmsaa_cs.h"
+@@ -1380,10 +1412,56 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+                                      reg::RB_DEPTHCONTROL normalized_depth_control,
+                                      uint32_t normalized_color_mask, const Shader& vertex_shader) {
++  static const bool profile = REXCVAR_GET(vulkan_render_target_profile);
++  using ProfileClock = std::chrono::steady_clock;
++  const auto update_started = profile ? ProfileClock::now() : ProfileClock::time_point{};
++  if (profile) {
++    ++render_target_update_profile.updates;
++  }
++  const auto report_profile = [&]() {
++    if (!profile || render_target_update_profile.updates != 65536) {
++      return;
++    }
++    const auto& stats = render_target_update_profile;
++    REXGPU_INFO(
++        "VulkanRenderTargetProfile updates={} failures={} host_updates={} fsi_updates={} "
++        "transfer_updates={} transfers={} transfer_tiles={} last_render_pass_hits={} "
++        "last_render_pass_misses={} framebuffer_lookups={} framebuffer_cache_hits={} "
++        "framebuffer_creates={} barriers={} base_ns={} transfers_ns={} setup_ns={} "
++        "barriers_ns={} total_ns={}",
++        stats.updates, stats.failures, stats.host_updates, stats.fsi_updates,
++        stats.transfer_updates, stats.transfers, stats.transfer_tiles, stats.last_render_pass_hits,
++        stats.last_render_pass_misses, stats.framebuffer_lookups, stats.framebuffer_cache_hits,
++        stats.framebuffer_creates, stats.barriers, stats.base_ns, stats.transfers_ns,
++        stats.setup_ns, stats.barriers_ns, stats.total_ns);
++    render_target_update_profile = {};
++  };
++  const auto finish_profile = [&]() {
++    if (profile) {
++      render_target_update_profile.total_ns +=
++          std::chrono::duration_cast<std::chrono::nanoseconds>(ProfileClock::now() - update_started)
++              .count();
++    }
++    report_profile();
++  };
++
+   if (!RenderTargetCache::Update(is_rasterization_done, normalized_depth_control,
+                                  normalized_color_mask, vertex_shader)) {
++    if (profile) {
++      render_target_update_profile.base_ns +=
++          std::chrono::duration_cast<std::chrono::nanoseconds>(ProfileClock::now() - update_started)
++              .count();
++      ++render_target_update_profile.failures;
++    }
++    finish_profile();
+     return false;
+   }
++  const auto base_finished = profile ? ProfileClock::now() : ProfileClock::time_point{};
++  if (profile) {
++    render_target_update_profile.base_ns +=
++        std::chrono::duration_cast<std::chrono::nanoseconds>(base_finished - update_started)
++            .count();
++  }
+ 
+   auto rb_surface_info = register_file().Get<reg::RB_SURFACE_INFO>();
+ 
+@@ -1394,11 +1472,34 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+ 
+   switch (GetPath()) {
+     case Path::kHostRenderTargets: {
++      if (profile) {
++        ++render_target_update_profile.host_updates;
++      }
+       RenderTarget* const* depth_and_color_render_targets =
+           last_update_accumulated_render_targets();
+ 
++      if (profile) {
++        uint64_t update_transfer_count = 0;
++        for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
++          for (const Transfer& transfer : last_update_transfers()[i]) {
++            ++update_transfer_count;
++            render_target_update_profile.transfer_tiles +=
++                transfer.end_tiles - transfer.start_tiles;
++          }
++        }
++        render_target_update_profile.transfers += update_transfer_count;
++        render_target_update_profile.transfer_updates += update_transfer_count != 0;
++      }
++      const auto transfers_started = profile ? ProfileClock::now() : ProfileClock::time_point{};
+       PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
+                                        depth_and_color_render_targets, last_update_transfers());
++      const auto transfers_finished = profile ? ProfileClock::now() : ProfileClock::time_point{};
++      if (profile) {
++        render_target_update_profile.transfers_ns +=
++            std::chrono::duration_cast<std::chrono::nanoseconds>(transfers_finished -
++                                                                 transfers_started)
++                .count();
++      }
+ 
+       if (depth_and_color_render_targets[0]) {
+         render_pass_key.depth_and_color_used |= 1 << 0;
+@@ -1429,9 +1530,20 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+       VkRenderPass render_pass = last_update_render_pass_key_ == render_pass_key
+                                      ? last_update_render_pass_
+                                      : VK_NULL_HANDLE;
++      if (profile) {
++        if (render_pass != VK_NULL_HANDLE) {
++          ++render_target_update_profile.last_render_pass_hits;
++        } else {
++          ++render_target_update_profile.last_render_pass_misses;
++        }
++      }
+       if (render_pass == VK_NULL_HANDLE) {
+         render_pass = GetHostRenderTargetsRenderPass(render_pass_key);
+         if (render_pass == VK_NULL_HANDLE) {
++          if (profile) {
++            ++render_target_update_profile.failures;
++          }
++          finish_profile();
+           return false;
+         }
+         // Framebuffer for a different render pass needed now.
+@@ -1451,9 +1563,23 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+         }
+       }
+       if (!framebuffer) {
++        const size_t framebuffer_count_before = framebuffers_.size();
+         framebuffer = GetHostRenderTargetsFramebuffer(render_pass_key, pitch_tiles_at_32bpp,
+                                                       depth_and_color_render_targets);
++        if (profile) {
++          ++render_target_update_profile.framebuffer_lookups;
++          if (framebuffers_.size() != framebuffer_count_before) {
++            render_target_update_profile.framebuffer_creates +=
++                framebuffers_.size() - framebuffer_count_before;
++          } else if (framebuffer) {
++            ++render_target_update_profile.framebuffer_cache_hits;
++          }
++        }
+         if (!framebuffer) {
++          if (profile) {
++            ++render_target_update_profile.failures;
++          }
++          finish_profile();
+           return false;
+         }
+       }
+@@ -1467,6 +1593,7 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+       last_update_framebuffer_ = framebuffer;
+ 
+       // Transition the used render targets.
++      const auto barriers_started = profile ? ProfileClock::now() : ProfileClock::time_point{};
+       for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+         RenderTarget* rt = depth_and_color_render_targets[i];
+         if (!rt) {
+@@ -1486,10 +1613,27 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+             vulkan_rt.current_stage_mask(), rt_dst_stage_mask, vulkan_rt.current_access_mask(),
+             rt_dst_access_mask, vulkan_rt.current_layout(), rt_new_layout);
+         vulkan_rt.SetUsage(rt_dst_stage_mask, rt_dst_access_mask, rt_new_layout);
++        if (profile) {
++          ++render_target_update_profile.barriers;
++        }
++      }
++      if (profile) {
++        const auto barriers_finished = ProfileClock::now();
++        render_target_update_profile.setup_ns +=
++            std::chrono::duration_cast<std::chrono::nanoseconds>(barriers_started -
++                                                                 transfers_finished)
++                .count();
++        render_target_update_profile.barriers_ns +=
++            std::chrono::duration_cast<std::chrono::nanoseconds>(barriers_finished -
++                                                                 barriers_started)
++                .count();
+       }
+     } break;
+ 
+     case Path::kPixelShaderInterlock: {
++      if (profile) {
++        ++render_target_update_profile.fsi_updates;
++      }
+       // For FSI, only the barrier is needed - already scheduled if required.
+       // But the buffer will be used for FSI drawing now.
+       UseEdramBuffer(EdramBufferUsage::kFragmentReadWrite);
+@@ -1506,9 +1650,14 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+ 
+     default:
+       assert_unhandled_case(GetPath());
++      if (profile) {
++        ++render_target_update_profile.failures;
++      }
++      finish_profile();
+       return false;
+   }
+ 
++  finish_profile();
+   return true;
+ }
+ 
+

@@ -2,7 +2,7 @@ diff --git a/include/rex/system/xmemory.h b/include/rex/system/xmemory.h
 index 0c39a42..6cd0cf3 100644
 --- a/include/rex/system/xmemory.h
 +++ b/include/rex/system/xmemory.h
-@@ -333,6 +333,20 @@ class PhysicalHeap : public BaseHeap {
+@@ -333,6 +333,22 @@ class PhysicalHeap : public BaseHeap {
  
    VirtualHeap* parent_heap_;
  
@@ -12,6 +12,8 @@ index 0c39a42..6cd0cf3 100644
 +  struct AccessProfile {
 +    uint64_t enables = 0;
 +    uint64_t requested_pages = 0;
++    uint64_t redundant_enables = 0;
++    uint64_t redundant_pages = 0;
 +    uint64_t protect_calls = 0;
 +    uint64_t protected_pages = 0;
 +    uint64_t triggers = 0;
@@ -46,7 +48,7 @@ index 76cc877..2595ab5 100644
    system_page_size_ = uint32_t(rex::memory::page_size());
  
    system_page_count_ =
-@@ -2101,6 +2106,10 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
+@@ -2101,6 +2106,52 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
    uint8_t* protect_base = membase_ + heap_base_;
    uint32_t protect_system_page_first = UINT32_MAX;
    auto global_lock = global_critical_region_.Acquire();
@@ -54,10 +56,52 @@ index 76cc877..2595ab5 100644
 +    ++access_profile_.enables;
 +    access_profile_.requested_pages += system_page_last - system_page_first + 1;
 +  }
++  const auto maybe_report_access_profile = [&]() {
++    if (!access_profile_enabled_ || (access_profile_.enables & 65535) != 0) {
++      return;
++    }
++    const auto stats = access_profile_;
++    global_lock.unlock();
++    REXSYS_INFO(
++        "PhysicalAccessProfile alias={:08X} enables={} requested_pages={} "
++        "redundant_enables={} redundant_pages={} protect_calls={} protected_pages={} "
++        "triggers={} trigger_pages={} expanded_pages={} unprotect_calls={}",
++        heap_base_, stats.enables, stats.requested_pages, stats.redundant_enables,
++        stats.redundant_pages, stats.protect_calls, stats.protected_pages, stats.triggers,
++        stats.trigger_pages, stats.expanded_pages, stats.unprotect_calls);
++  };
++
++  // Quantify ranges for which a bitmap fast path could skip the per-page loop.
++  // This diagnostic check is enabled only with physical_access_profile because
++  // a clean A/B did not show an uninstrumented throughput improvement.
++  bool all_pages_already_watched =
++      access_profile_enabled_ && enable_invalidation_notifications && !enable_data_providers;
++  if (all_pages_already_watched) {
++    const uint32_t block_first = system_page_first >> 6;
++    const uint32_t block_last = system_page_last >> 6;
++    for (uint32_t block_index = block_first; block_index <= block_last; ++block_index) {
++      uint64_t requested_mask = UINT64_MAX;
++      if (block_index == block_first) {
++        requested_mask &= UINT64_MAX << (system_page_first & 63);
++      }
++      if (block_index == block_last && (system_page_last & 63) != 63) {
++        requested_mask &= (uint64_t(1) << ((system_page_last & 63) + 1)) - 1;
++      }
++      if ((system_page_flags_[block_index].notify_on_invalidation & requested_mask) !=
++          requested_mask) {
++        all_pages_already_watched = false;
++        break;
++      }
++    }
++  }
++  if (all_pages_already_watched) {
++    ++access_profile_.redundant_enables;
++    access_profile_.redundant_pages += system_page_last - system_page_first + 1;
++  }
    for (uint32_t i = system_page_first; i <= system_page_last; ++i) {
      // Check if need to enable callbacks for the page and raise its protection.
      //
-@@ -2154,7 +2163,13 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
+@@ -2154,7 +2205,13 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
        }
      }
      if (protect_system_page) {
@@ -71,24 +115,15 @@ index 76cc877..2595ab5 100644
          protect_system_page_first = i;
        }
      } else {
-@@ -2170,6 +2185,16 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
+@@ -2170,6 +2227,7 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
                           (system_page_last + 1 - protect_system_page_first) * system_page_size_,
                           protect_access);
    }
-+  if (access_profile_enabled_ && (access_profile_.enables & 65535) == 0) {
-+    const auto stats = access_profile_;
-+    global_lock.unlock();
-+    REXSYS_INFO("PhysicalAccessProfile alias={:08X} enables={} requested_pages={} "
-+                "protect_calls={} protected_pages={} triggers={} trigger_pages={} "
-+                "expanded_pages={} unprotect_calls={}",
-+                heap_base_, stats.enables, stats.requested_pages, stats.protect_calls,
-+                stats.protected_pages, stats.triggers, stats.trigger_pages,
-+                stats.expanded_pages, stats.unprotect_calls);
-+  }
++  maybe_report_access_profile();
  }
  
  bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
-@@ -2223,6 +2248,10 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
+@@ -2223,6 +2281,10 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
    if (!any_watched) {
      return false;
    }
@@ -99,7 +134,7 @@ index 76cc877..2595ab5 100644
  
    // Trigger callbacks.
    if (!unprotect) {
-@@ -2279,6 +2308,9 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
+@@ -2279,6 +2341,9 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
    }
  
    // Unprotect ranges that need unprotection.
@@ -109,7 +144,7 @@ index 76cc877..2595ab5 100644
    if (unprotect) {
      uint8_t* protect_base = membase_ + heap_base_;
      uint32_t unprotect_system_page_first = UINT32_MAX;
-@@ -2296,6 +2328,9 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
+@@ -2296,6 +2361,9 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
        }
        if (unprotect_page) {
          if (unprotect_system_page_first == UINT32_MAX) {

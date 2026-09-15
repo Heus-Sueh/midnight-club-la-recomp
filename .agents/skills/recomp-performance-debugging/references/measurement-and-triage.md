@@ -155,6 +155,27 @@ progress outrank a synthetic FPS gain.
   MCLA gameplay and over 99% during boot, but per-draw comparison and cache
   maintenance produced no FPS or CPU improvement. Measure the complete A/B and
   remove the cache when avoided API calls do not improve the limiting thread.
+- Treat render-target cache profiles the same way. Count transfer-bearing
+  updates, transferred tiles, render-pass reuse, framebuffer lookups and actual
+  creations before optimizing a large backend routine. In MCLA, only 0.51% of
+  6.62 million Vulkan render-target updates contained transfers, the previous
+  render pass was reusable 99.57% of the time, and only 27 framebuffers were
+  created. Transfer and framebuffer code was therefore visually large but had
+  a low measured ceiling. Use the default-off two-layer profiler and
+  `just analyze-render-target <log>` to separate generic cache work from Vulkan
+  transfers, setup and barriers.
+- A nearly perfect candidate hit rate still needs a clean throughput A/B. MCLA
+  could reuse a full-key-identical accumulated render-target pointer for 99.56%
+  of lookups, and the instrumented preparation share fell, yet a diagnostics-
+  off A/B/A/B did not improve FPS or limiting-thread CPU. Remove such a fast
+  path when its end-to-end effect is absent, and retain only the default-off
+  counter if it helps future deterministic captures.
+- Multiple clocks per draw materially perturb a saturated command thread. Use
+  phase timing to select the next target, disable all timing probes for FPS
+  comparisons, and do not compare profiler-on FPS with a clean baseline. In a
+  measured MCLA run, adding the second render-target timing layer increased the
+  generic update from roughly 0.29 to 0.45 microseconds per call and visibly
+  reduced presentation throughput.
 - For Vulkan shared-memory upload stalls, separate upload-buffer allocation,
   write-watch rearming, and copying. MCLA issued roughly 98k-121k tiny uploads
   per five seconds; `MakeRangeValid`/Linux `mprotect` cost 603-745 ms while

@@ -37,12 +37,16 @@ def main():
     rows = summarize(args.log.read_text(errors="replace"))
     if not rows:
         parser.error("need at least two PhysicalAccessProfile snapshots per alias")
-    print("alias     enables  protect_calls  protected_pages  triggers  requested/trigger  expanded/trigger")
+    print("alias     enables  redundant  redundant_%  protect_calls  protected_pages  "
+          "triggers  requested/trigger  expanded/trigger")
     for alias, row in sorted(rows.items()):
         triggers = row["triggers"]
+        redundant = row.get("redundant_enables", 0)
+        redundant_percent = 100.0 * redundant / row["enables"] if row["enables"] else 0
         requested = row["trigger_pages"] / triggers if triggers else 0
         expanded = row["expanded_pages"] / triggers if triggers else 0
-        print(f"{alias} {row['enables']:9d} {row['protect_calls']:14d} "
+        print(f"{alias} {row['enables']:9d} {redundant:10d} {redundant_percent:12.1f} "
+              f"{row['protect_calls']:14d} "
               f"{row['protected_pages']:16d} {triggers:9d} {requested:18.2f} {expanded:17.2f}")
 
 

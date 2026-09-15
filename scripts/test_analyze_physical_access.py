@@ -31,6 +31,16 @@ class PhysicalAccessTests(unittest.TestCase):
                 "PhysicalAccessProfile alias=A0000000 enables=196608",
             ]))
 
+    def test_redundant_fast_path_counters_are_subtracted(self):
+        result = summarize("\n".join([
+            "PhysicalAccessProfile alias=A0000000 enables=65536 redundant_enables=100 "
+            "redundant_pages=300",
+            "PhysicalAccessProfile alias=A0000000 enables=131072 redundant_enables=4100 "
+            "redundant_pages=12300",
+        ]))
+        self.assertEqual(result["A0000000"]["redundant_enables"], 4000)
+        self.assertEqual(result["A0000000"]["redundant_pages"], 12000)
+
 
 if __name__ == "__main__":
     unittest.main()

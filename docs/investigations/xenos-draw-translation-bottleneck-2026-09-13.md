@@ -145,13 +145,82 @@ thread; the wider dirty region plausibly increased excess shared-memory upload
 and Vulkan work. This is an inference, not a directly measured byte comparison
 for the same run.
 
+## Redundant rearm fast-path control
+
+An opt-in bitmap probe found that the `E0000000` alias received 41,315 ranges
+that were already fully watched in 327,680 enable calls (12.6%). The same
+capture found one redundant range for `A0000000` and none for `C0000000`.
+Although those E-alias ranges covered roughly nine million pages, an
+uninstrumented 2x2 restart-controlled comparison rejected the proposed early
+return as a useful throughput optimization:
+
+| Order | Fast path | FPS | Process CPU | GPU Commands CPU |
+| --- | --- | ---: | ---: | ---: |
+| 1 | enabled | 28.92 | 368.1% | 84.9% |
+| 2 | disabled | 28.27 | 373.5% | 85.4% |
+| 3 | enabled | 28.75 | 361.4% | 83.2% |
+| 4 | disabled | 29.53 | 353.6% | 82.5% |
+
+The means were 28.835 FPS enabled and 28.90 FPS disabled. The production fast
+path was removed. The default-off physical-access profiler retains only the
+candidate counter so future workloads can quantify redundancy without changing
+the original arm-before-copy behavior.
+
+A separate destructive control skipped the `C0000000` alias only. It presented
+at 28.72 FPS with 359.9% process CPU and 83.3% `GPU Commands` CPU, which is
+inside the control variation above. The option was removed because it was both
+unsafe and ineffective. These controls exhaust the current redundant-rearm and
+alias-skipping branch; they do not show that required `mprotect` calls are free.
+
+## Vulkan render-target update profile
+
+A default-off two-layer profiler measured 6,619,136
+`VulkanRenderTargetCache::Update` calls in a 60-second launch capture. Only
+0.511% contained ownership transfers. `PerformTransfersAndResolveClears`
+accounted for 526 ms, while the entire Vulkan update accounted for 3,423 ms.
+The last render pass was reused 99.573% of the time, and 34,887 of 34,914
+framebuffer lookups hit the cache; only 27 framebuffers were created. This
+rejects transfers, render-pass lookup and framebuffer creation as the main
+throughput boundary in that sequence.
+
+The generic cache profiler then attributed its update time as follows. The
+clock reads are intentionally intrusive, so the percentages select targets but
+are not clean FPS measurements.
+
+| Generic cache phase | Time | Share |
+| --- | ---: | ---: |
+| Selection and register-derived state | 443 ms | 15.8% |
+| No-render-target path | 3 ms | 0.1% |
+| Draw-height estimation | 391 ms | 14.0% |
+| Key preparation and RT lookup | 877 ms | 31.3% |
+| Ownership-map update | 655 ms | 23.4% |
+| Accumulated binding maintenance | 274 ms | 9.8% |
+
+Only 1.05% of 6,225,920 updates had no render target, and only 35 new render
+targets were created. A candidate probe showed that the previously accumulated
+binding had an identical full key for 99.562% of lookups. Reusing that pointer
+before the `unordered_map` lookup reduced the profiled preparation share from
+31.3% to 26.8%, but a diagnostics-off A/B/A/B did not improve throughput:
+
+| Order | Last-binding reuse | FPS | Process CPU | Hottest thread CPU |
+| --- | --- | ---: | ---: | ---: |
+| 1 | enabled | 25.17 | 391.4% | 93.9% |
+| 2 | disabled | 25.77 | 394.5% | 94.0% |
+| 3 | enabled | 25.72 | 395.2% | 93.9% |
+| 4 | disabled | 28.35 | 354.7% | 88.3% |
+
+The tested launch sequence varied significantly, but neither pair favored the
+optimization. The production fast path was removed. The profiler retains the
+default-off candidate count so a more deterministic route can quantify it
+without changing rendering semantics.
+
 ## Next target
 
 Retain the draw bypass solely as a negative-control tool and keep the project
-at 16 invalidation pages. The next implementation target is reducing redundant
-write-watch rearming or coalescing protection runs without widening uploaded
-dirty ranges and without violating the arm-before-copy race invariant. Before
-changing alias policy, collect multiple deterministic gameplay scenes because
-an alias with zero activity in one capture may be required elsewhere. Do not
-ship skipped draws or infer that one sampled sub-phase owns the full
-58.7-point CPU ceiling.
+at 16 invalidation pages. Redundant write-watch rearming, alias skipping,
+render-target transfers and last-binding lookup reuse did not improve the
+limiting thread. Return to the remaining `IssueDraw` phases with render-target
+and physical-access clocks disabled; refresh bounded hot-thread samples before
+choosing between binding/state translation and the pre-texture path. Do not
+ship skipped draws or infer that one sampled sub-phase owns the full 58.7-point
+CPU ceiling.

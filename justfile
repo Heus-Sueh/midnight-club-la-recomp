@@ -56,6 +56,10 @@ analyze-queue log:
 analyze-memory log:
     "{{ python }}" scripts/analyze_physical_access.py "{{ log }}"
 
+# Summarize default-off Vulkan render-target update profile intervals.
+analyze-render-target log:
+    "{{ python }}" scripts/analyze_render_target_profile.py "{{ log }}"
+
 # Rank leaf and inclusive functions from GDB hot-thread samples.
 analyze-samples capture:
     "{{ python }}" scripts/analyze_hot_thread_samples.py "{{ capture }}"

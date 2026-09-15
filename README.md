@@ -190,6 +190,8 @@ git -C thirdparty/rexglue-sdk apply \
   ../../patches/rexglue-shared-memory-invalidation-granularity.patch
 git -C thirdparty/rexglue-sdk apply \
   ../../patches/rexglue-vulkan-draw-bypass-diagnostic.patch
+git -C thirdparty/rexglue-sdk apply \
+  ../../patches/rexglue-render-target-profiling.patch
 ```
 
 ## Extract the game
