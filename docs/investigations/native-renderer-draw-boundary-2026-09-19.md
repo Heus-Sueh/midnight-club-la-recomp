@@ -170,7 +170,10 @@ row contains:
 - color/depth render-target state, masks, viewport, scissor, shader program
   control, clipping, and output-path registers.
 - raw values for only the vertex fetches, texture fetches, and float constants
-  referenced by the active shaders.
+  referenced by the active shaders;
+- SDK-resolved texture layouts and sampler state, plus blend registers and
+  alpha reference, so the analyzer does not need to duplicate fetch-constant
+  layout rules.
 
 The trace uses a PM4 `XE_SWAP`-only frame counter. The normal command-processor
 counter is not suitable because host vblank also increments it. Empty swap
@@ -207,6 +210,28 @@ is vertex fetch constant 95. Every `vf95` describes 36 words (144 bytes), with
 an unchanged 9-dword vertex layout and a different address. The vertex shader
 reads position `float3`, packed color, and UV `float2`; the pixel shader samples
 one 2D texture and multiplies it by interpolated color.
+
+A later three-frame resource-contract capture contained 4,914 draws. The same
+dominant signature contributed exactly 1,625 draws in each frame (4,875 total,
+99.2%) and retained one resolved descriptor and sampler state throughout:
+
+```text
+tf0: DXT2_3, 256x256x1, 2D tiled, pitch 256, k8in16
+     physical base 0x1BB40000, base size 65,536 bytes, no mip allocation
+s0:  linear min/mag/mip, repeat U/V/W, anisotropy disabled, mip 0 only
+RT0: pitch 1280, 1x MSAA, k_8_8_8_8, eDRAM base tile 720
+DS:  D24FS8, eDRAM base tile 0
+blend: src_alpha / one_minus_src_alpha for color and alpha, add operation
+alpha test: not-equal zero; alpha-to-coverage disabled
+depth: test and write enabled, greater-equal; stencil disabled
+color mask: RGBA enabled
+```
+
+The descriptor address and layout are therefore stable across this bounded
+intro capture. This does not prove that the 64 KiB backing contents are static
+or CPU-coherent: a GPU resolve may update guest-visible storage without a safe
+CPU read when readback is disabled. Content lifetime and synchronization remain
+separate evidence requirements.
 
 The command trace maps exactly to the high-level hook: the first active scene
 frame contained 1,628 `0x8241CD88` records, while the dominant shader pair
@@ -300,13 +325,15 @@ just analyze-present out/build/linux-amd64-release/logs/<log>.log 0
 - This finder detects direct `lis` + `ori` constant construction. Dynamically
   assembled headers and indirect wrappers require separate discovery.
 - Final draw state, shader identity, shader-used resources, and the transient
-  `0x8241CD88` vertex contents are now retained. Texture contents and complete
-  render-target lifetime/synchronization are not yet owned by the project.
+  `0x8241CD88` vertex contents are now retained. The dominant pass also has a
+  stable resolved texture/sampler and complete fixed-function blend/depth/RT
+  description. Texture contents and complete render-target
+  lifetime/synchronization are not yet owned by the project.
 - The next native prototype may coalesce the 1,625 ordered four-vertex buffers
   into one host upload and one or a few Vulkan submissions. The ordered CPU
-  batch and topology conversion are now proven; texture ownership,
-  render-target synchronization, blend state, and offscreen image comparison
-  remain before any native submission or suppression.
+  batch and topology conversion are now proven; texture-content ownership,
+  render-target synchronization, and offscreen image comparison remain before
+  any native submission or suppression.
 - A native draw is not safe until its shader, vertex/index data, constants,
   textures, render targets, viewport/scissor, synchronization, and fallback
   contract are known.

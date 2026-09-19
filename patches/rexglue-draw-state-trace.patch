@@ -57,7 +57,7 @@ index 2cf24c4..36cf3c5 100644
  
  // GPU Alpha Test
 diff --git i/src/graphics/command_processor.cpp w/src/graphics/command_processor.cpp
-index a744375..eba6709 100644
+index a744375..0d5a0d2 100644
 --- i/src/graphics/command_processor.cpp
 +++ w/src/graphics/command_processor.cpp
 @@ -19,11 +19,13 @@
@@ -96,7 +96,7 @@ index a744375..eba6709 100644
  CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
                                     system::KernelState* kernel_state)
      : memory_(graphics_system->memory()),
-@@ -115,6 +132,223 @@ CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
+@@ -115,6 +132,305 @@ CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
  
  CommandProcessor::~CommandProcessor() = default;
  
@@ -165,6 +165,74 @@ index a744375..eba6709 100644
 +  return output;
 +}
 +
++std::string GetUsedTextureInfos(const RegisterFile& regs, const Shader* shader) {
++  std::string output;
++  if (!shader || !shader->is_ucode_analyzed()) {
++    return output;
++  }
++  uint32_t captured_mask = 0;
++  for (const Shader::TextureBinding& binding : shader->texture_bindings()) {
++    const uint32_t index = binding.fetch_constant;
++    const uint32_t bit = uint32_t(1) << index;
++    if (captured_mask & bit) {
++      continue;
++    }
++    captured_mask |= bit;
++    const xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(index);
++    TextureInfo info;
++    if (!TextureInfo::Prepare(fetch, &info)) {
++      continue;
++    }
++    if (!output.empty()) {
++      output.push_back(';');
++    }
++    fmt::format_to(
++        std::back_inserter(output),
++        "{}:{}/{}/{}/{}/{}/{}/{}/{}/{:08X}/{}/{:08X}/{}", index,
++        uint32_t(info.format), uint32_t(info.endianness),
++        uint32_t(info.dimension), info.width + 1, info.height + 1,
++        info.depth + 1, info.pitch, uint32_t(info.is_tiled),
++        info.memory.base_address, info.memory.base_size,
++        info.memory.mip_address, info.memory.mip_size);
++  }
++  return output;
++}
++
++std::string GetUsedSamplers(const RegisterFile& regs, const Shader* shader) {
++  std::string output;
++  if (!shader || !shader->is_ucode_analyzed()) {
++    return output;
++  }
++  uint32_t captured_mask = 0;
++  for (const Shader::TextureBinding& binding : shader->texture_bindings()) {
++    const uint32_t index = binding.fetch_constant;
++    const uint32_t bit = uint32_t(1) << index;
++    if (captured_mask & bit) {
++      continue;
++    }
++    captured_mask |= bit;
++    const xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(index);
++    SamplerInfo sampler;
++    if (!SamplerInfo::Prepare(fetch, binding.fetch_instr, &sampler)) {
++      continue;
++    }
++    uint32_t lod_bias_bits;
++    std::memcpy(&lod_bias_bits, &sampler.lod_bias, sizeof(lod_bias_bits));
++    if (!output.empty()) {
++      output.push_back(';');
++    }
++    fmt::format_to(
++        std::back_inserter(output),
++        "{}:{}/{}/{}/{}/{}/{}/{}/{}/{:08X}/{}/{}", index,
++        uint32_t(sampler.min_filter), uint32_t(sampler.mag_filter),
++        uint32_t(sampler.mip_filter), uint32_t(sampler.clamp_u),
++        uint32_t(sampler.clamp_v), uint32_t(sampler.clamp_w),
++        uint32_t(sampler.aniso_filter), uint32_t(sampler.border_color),
++        lod_bias_bits, sampler.mip_min_level, sampler.mip_max_level);
++  }
++  return output;
++}
++
 +std::string GetUsedFloatConstants(const RegisterFile& regs, const Shader* shader,
 +                                  uint32_t register_base) {
 +  std::string output;
@@ -226,7 +294,10 @@ index a744375..eba6709 100644
 +        "pa_cl_vport_xoffset,pa_cl_vport_yscale,pa_cl_vport_yoffset,"
 +        "pa_cl_vport_zscale,pa_cl_vport_zoffset,sq_program_cntl,sq_context_misc,"
 +        "pa_cl_clip_cntl,pa_su_sc_mode_cntl,pa_cl_vte_cntl,vgt_output_path_cntl,"
-+        "vgt_hos_cntl,vertex_fetches,vs_texture_fetches,ps_texture_fetches,"
++        "vgt_hos_cntl,rb_blendcontrol0,rb_blendcontrol1,rb_blendcontrol2,"
++        "rb_blendcontrol3,rb_blend_red,rb_blend_green,rb_blend_blue,"
++        "rb_blend_alpha,rb_alpha_ref,vertex_fetches,vs_texture_fetches,ps_texture_fetches,"
++        "vs_texture_infos,ps_texture_infos,vs_samplers,ps_samplers,"
 +        "vs_float_constants,ps_float_constants\n",
 +        trace.file);
 +    REXGPU_INFO(
@@ -263,6 +334,10 @@ index a744375..eba6709 100644
 +  const std::string vertex_fetches = GetUsedVertexFetches(regs, active_vertex_shader_);
 +  const std::string vs_texture_fetches = GetUsedTextureFetches(regs, active_vertex_shader_);
 +  const std::string ps_texture_fetches = GetUsedTextureFetches(regs, active_pixel_shader_);
++  const std::string vs_texture_infos = GetUsedTextureInfos(regs, active_vertex_shader_);
++  const std::string ps_texture_infos = GetUsedTextureInfos(regs, active_pixel_shader_);
++  const std::string vs_samplers = GetUsedSamplers(regs, active_vertex_shader_);
++  const std::string ps_samplers = GetUsedSamplers(regs, active_pixel_shader_);
 +  const std::string vs_float_constants = GetUsedFloatConstants(
 +      regs, active_vertex_shader_, XE_GPU_REG_SHADER_CONSTANT_000_X);
 +  const std::string ps_float_constants = GetUsedFloatConstants(
@@ -273,7 +348,7 @@ index a744375..eba6709 100644
 +      "%" PRIu64 ",%" PRIu64 ",%s,%u,%u,%u,%u,%u,%u,%zu,%u,0x%016" PRIX64
 +      ",0x%016" PRIX64 ",0x%016" PRIX64 ",0x%016" PRIX64 ",0x%016" PRIX64
 +      ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-+      "%u,%u,%u,%u,%u,%s,%s,%s,%s,%s\n",
++      "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
 +      frame, trace.frame_draw_index++, opcode_name, uint32_t(prim_type), index_count, indexed,
 +      index_format, index_endian, index_guest_base, index_length,
 +      uint32_t(major_mode_explicit), vs_hash, ps_hash, fetch_hash, float_hash, bool_loop_hash,
@@ -291,7 +366,14 @@ index a744375..eba6709 100644
 +      regs[XE_GPU_REG_SQ_CONTEXT_MISC], regs[XE_GPU_REG_PA_CL_CLIP_CNTL],
 +      regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL], regs[XE_GPU_REG_PA_CL_VTE_CNTL],
 +      regs[XE_GPU_REG_VGT_OUTPUT_PATH_CNTL], regs[XE_GPU_REG_VGT_HOS_CNTL],
++      regs[XE_GPU_REG_RB_BLENDCONTROL0], regs[XE_GPU_REG_RB_BLENDCONTROL1],
++      regs[XE_GPU_REG_RB_BLENDCONTROL2], regs[XE_GPU_REG_RB_BLENDCONTROL3],
++      regs[XE_GPU_REG_RB_BLEND_RED], regs[XE_GPU_REG_RB_BLEND_GREEN],
++      regs[XE_GPU_REG_RB_BLEND_BLUE], regs[XE_GPU_REG_RB_BLEND_ALPHA],
++      regs[XE_GPU_REG_RB_ALPHA_REF],
 +      vertex_fetches.c_str(), vs_texture_fetches.c_str(), ps_texture_fetches.c_str(),
++      vs_texture_infos.c_str(), ps_texture_infos.c_str(),
++      vs_samplers.c_str(), ps_samplers.c_str(),
 +      vs_float_constants.c_str(), ps_float_constants.c_str());
 +  ++trace.row_count;
 +}
@@ -320,7 +402,7 @@ index a744375..eba6709 100644
  bool CommandProcessor::Initialize() {
    // Initialize the gamma ramps to their default (linear) values - taken from
    // what games set when starting with the sRGB (return value 1)
-@@ -958,6 +1192,8 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+@@ -958,6 +1274,8 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
    uint32_t frontbuffer_height = reader->ReadAndSwap<uint32_t>();
    reader->AdvanceRead((count - 4) * sizeof(uint32_t));
  
@@ -329,7 +411,7 @@ index a744375..eba6709 100644
    IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
  
    ++counter_;
-@@ -1380,6 +1616,10 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+@@ -1380,6 +1698,10 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
            xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type);
        draw_succeeded = IssueDraw(vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
                                   is_indexed ? &index_buffer_info : nullptr, major_mode_explicit);

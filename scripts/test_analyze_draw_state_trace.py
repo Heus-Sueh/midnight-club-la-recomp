@@ -3,7 +3,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from analyze_draw_state_trace import PASS_SIGNATURE_COLUMNS, read_trace, summarize
+from analyze_draw_state_trace import (
+    PASS_SIGNATURE_COLUMNS,
+    decode_blend_control,
+    decode_color_depth_control,
+    decode_render_target,
+    parse_samplers,
+    parse_texture_infos,
+    read_trace,
+    summarize,
+)
 
 
 class DrawStateTraceAnalysisTests(unittest.TestCase):
@@ -32,6 +41,17 @@ class DrawStateTraceAnalysisTests(unittest.TestCase):
             "rb_color_info3": "0",
             "rb_depth_info": "3",
             "rb_color_mask": "15",
+            "rb_colorcontrol": "0xAA00000D",
+            "rb_depthcontrol": "0x00700766",
+            "rb_blendcontrol0": "0x00010706",
+            "rb_blendcontrol1": "0",
+            "rb_blendcontrol2": "0",
+            "rb_blendcontrol3": "0",
+            "rb_blend_red": "0",
+            "rb_blend_green": "0",
+            "rb_blend_blue": "0",
+            "rb_blend_alpha": "0",
+            "rb_alpha_ref": "0",
             "rb_modecontrol": "4",
             "pa_sc_screen_tl": "0",
             "pa_sc_screen_br": "47187200",
@@ -39,6 +59,10 @@ class DrawStateTraceAnalysisTests(unittest.TestCase):
             "vertex_fetches": "0:0000000100000002",
             "vs_texture_fetches": "",
             "ps_texture_fetches": "0:000000010000000200000003000000040000000500000006",
+            "vs_texture_infos": "",
+            "ps_texture_infos": "0:19/1/1/256/256/1/256/1/1BB40000/65536/00000000/0",
+            "vs_samplers": "",
+            "ps_samplers": "0:1/1/1/0/0/0/0/0/00000000/0/0",
             "vs_float_constants": "8:00000001000000020000000300000004",
             "ps_float_constants": "",
         }
@@ -62,6 +86,49 @@ class DrawStateTraceAnalysisTests(unittest.TestCase):
         self.assertEqual(dominant["max_index_count"], 72)
         self.assertEqual(dominant["unique_vertex_fetches"], 1)
         self.assertEqual(dominant["unique_ps_texture_fetches"], 1)
+        self.assertEqual(dominant["resolved_ps_textures"][0]["format_name"], "DXT2_3")
+        self.assertEqual(dominant["resolved_ps_samplers"][0]["min_filter_name"], "linear")
+
+    def test_decodes_resolved_texture_and_sampler_contract(self) -> None:
+        texture = parse_texture_infos(
+            "0:19/1/1/256/256/1/256/1/1BB40000/65536/00000000/0"
+        )[0]
+        self.assertEqual(texture["base_address"], 0x1BB40000)
+        self.assertEqual(texture["base_size"], 65536)
+        self.assertEqual(texture["dimension_name"], "2D")
+        self.assertTrue(texture["tiled"])
+
+        sampler = parse_samplers("0:1/1/1/0/0/0/0/0/00000000/0/0")[0]
+        self.assertEqual(sampler["mag_filter_name"], "linear")
+        self.assertEqual(sampler["clamp_u_name"], "repeat")
+
+    def test_decodes_blend_and_render_target_contract(self) -> None:
+        blend = decode_blend_control("0x00010706")
+        self.assertIsNotNone(blend)
+        self.assertEqual(blend["color_src"], "src_alpha")
+        self.assertEqual(blend["color_dst"], "one_minus_src_alpha")
+        self.assertEqual(blend["alpha_src"], "one")
+
+        target = decode_render_target("0x14000500", "0x000002D0", "0x00010000")
+        self.assertIsNotNone(target)
+        self.assertEqual(target["surface_pitch"], 1280)
+        self.assertEqual(target["msaa"], "1x")
+        self.assertEqual(target["color_base_tiles"], 720)
+        self.assertEqual(target["color_format"], "8_8_8_8")
+        self.assertEqual(target["depth_format"], "D24FS8")
+
+        controls = decode_color_depth_control("0xAA00000D", "0x00700766")
+        self.assertIsNotNone(controls)
+        self.assertTrue(controls["alpha_test"])
+        self.assertEqual(controls["alpha_func"], "not_equal")
+        self.assertTrue(controls["depth_test"])
+        self.assertTrue(controls["depth_write"])
+        self.assertEqual(controls["depth_func"], "greater_equal")
+        self.assertFalse(controls["stencil_test"])
+
+    def test_rejects_malformed_resolved_texture(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid texture info binding"):
+            parse_texture_infos("0:19/1/1")
 
     def test_rejects_incomplete_trace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

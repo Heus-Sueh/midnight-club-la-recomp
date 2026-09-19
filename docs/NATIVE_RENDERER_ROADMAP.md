@@ -74,7 +74,7 @@ flowchart TD
 | Component | Status | Details |
 | :--- | :--- | :--- |
 | **GPU Milestone** | **Tier 2 Capture Active** | The first DrawPrimitiveUP-style path publishes typed records and frame-owned vertex bytes while Xenos remains the renderer. |
-| **Final Draw-State Trace** | **Complete** | A bounded SDK trace records final state plus shader-used resources; the first measured PM4 frame contained 1,654 draws and five pass signatures. |
+| **Final Draw-State Trace** | **Complete** | A bounded SDK trace records final state plus SDK-resolved texture/sampler resources and blend state. Three measured PM4 frames reproduced the dominant pass at exactly 1,625 draws per frame. |
 | **Dominant Strip CPU Batch** | **Complete** | A default-off compare path decodes `k8in32` vertices and converts 1,625 independent strips into 6,500 vertices and 9,750 ordered indices without submitting GPU work. |
 | **Frame Pacing** | **Complete** | High-precision monotonic pacing attached to the host clock at `grcDevice::Present`. |
 | **Swap Interception** | **Complete** | Deterministic `mcla_native_present_hook` at `0x8241A0E4` (generated output `generated/default/midnight_club_la_recomp.68.cpp`, not tracked). |
@@ -171,6 +171,11 @@ commands can eventually map to native Vulkan textures and pipelines.
     decodes their 9-dword layout, and emits independent triangle-list indices.
     The three six-vertex lists remain unsupported by design. Unit and runtime
     checks reject cross-strip topology, missing data, and non-finite vertices.
+  - A three-frame resource capture resolved the dominant pass to one tiled
+    256x256 DXT3 texture at physical `0x1BB40000` (64 KiB), linear/repeat
+    sampling, standard source-alpha blending, alpha-not-zero testing, and
+    reversed greater-equal depth test/write into a 1280-pixel RGBA8 target.
+    Descriptor stability is proven; texture-content coherence is not.
 
 ---
 
@@ -231,10 +236,11 @@ gantt
 
 ### Next Priorities
 
-1. **Own the remaining pass resources**
-   - Map the invariant texture, render-target lifetime, blend semantics, and
-     synchronization for `VS 0x88F617431F7D9C9B` /
-     `PS 0x46BE7CEEBA3ECD76` without copying unrelated state.
+1. **Prove texture-content lifetime and synchronization**
+   - Determine whether physical `0x1BB40000..0x1BB4FFFF` is CPU-uploaded,
+     GPU-resolved, or aliased before the dominant pass. Capture a bounded
+     content identity only at a proven coherent boundary; descriptor stability
+     alone is insufficient.
 2. **Submit the batch to an offscreen Vulkan comparison target**
    - Upload the ordered host vertices and indices without touching the displayed
      Xenos framebuffer. Capture a deterministic native image for comparison.

@@ -82,6 +82,22 @@ safe replacement. Before native rendering, retain the shader-used fetch
 constants and referenced resource lifetime, then correlate the final state back
 to the high-level hook. Keep the emulated draw active throughout this stage.
 
+Prefer resolving texture and sampler descriptors with the emulator SDK's own
+validated helpers after shader instruction overrides have been applied. Raw
+fetch constants are valuable evidence, but reimplementing their bitfields in
+an offline script can silently disagree on dimensions, mip allocation, tiling,
+or effective filtering. Record both raw and resolved forms. Treat a descriptor
+that is invariant across frames as proof of layout and binding stability only;
+it does not prove that the referenced bytes are static, CPU-coherent, or not a
+GPU resolve destination. Establish content lifetime at a synchronization point
+before a native upload reads guest memory.
+
+For a first Vulkan pipeline contract, capture blend controls, blend constants,
+alpha reference, color/depth controls, write masks, render-target formats and
+eDRAM bases together. Alpha test and reversed-depth compare modes are easy to
+miss when shader, texture, and topology already appear correct, and either can
+make a geometrically correct native image diverge completely.
+
 For DrawPrimitiveUP-style helpers, separate allocation observation from payload
 capture. A builder may emit the draw packet and return writable guest memory;
 the caller populates it only after the function returns. Prove the returned

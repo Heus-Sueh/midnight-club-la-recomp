@@ -200,6 +200,21 @@ every fetched dword, follow the shader's actual attribute offsets and result
 swizzles, and reject non-finite float attributes. Keep the host vertex type
 plain and platform-independent so the same code runs on Windows and Linux.
 
+Resolve Xenos texture layouts and effective sampler state through the SDK that
+will consume them. Shader fetch instructions can override fields in the raw
+fetch constant, so native Vulkan descriptors must be derived from the resolved
+pair rather than the constant alone. Keep guest physical ranges in the capture
+contract, but do not read or upload them until their producer and coherence
+boundary are proven. With GPU readback disabled, a stable CPU-side address is
+not evidence that GPU-resolved contents are visible to the CPU.
+
+Mirror the complete output-merger contract in an offscreen prototype: color
+write masks, separate color/alpha blend factors and operations, alpha testing,
+depth compare/write, stencil, target formats, MSAA, viewport, and scissor. Xbox
+360 titles frequently use reversed depth (`greater`/`greater-equal`); assuming
+Vulkan's common `less` default can yield an empty or inverted result while all
+geometry and shader inputs are otherwise correct.
+
 Independent triangle strips need explicit separation. Converting each
 four-vertex strip to `0,1,2, 2,1,3` triangle-list indices preserves winding and
 prevents accidental cross-draw triangles when payloads share one upload. Track
