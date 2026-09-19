@@ -9,6 +9,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(MCLA_ENABLE_HOTSPOT_PROBE
     "Instrument selected guest functions for performance investigation" OFF)
+option(MCLA_BUILD_TESTS "Build project-owned native renderer tests" OFF)
 
 include(generated/rexglue.cmake)
 
@@ -16,6 +17,7 @@ include(generated/rexglue.cmake)
 set(MIDNIGHTCLUBLA_SOURCES
     src/main.cpp
     src/native_renderer/native_renderer.cpp
+    src/native_renderer/native_pass_batch.cpp
     src/native_renderer/native_scene.cpp
     src/native_renderer/camera_interpolator.cpp
 )
@@ -48,6 +50,18 @@ if(REXSDK_DIR)
 endif()
 
 rexglue_setup_target(midnight_club_la GPU_PLUGINS xenos)
+
+if(MCLA_BUILD_TESTS)
+    enable_testing()
+    add_executable(mcla_native_pass_batch_test
+        tests/native_pass_batch_test.cpp
+        src/native_renderer/native_pass_batch.cpp
+    )
+    target_include_directories(mcla_native_pass_batch_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    add_test(NAME native_pass_batch COMMAND mcla_native_pass_batch_test)
+endif()
 
 # The runtime resolves its default configuration beside the executable. Keep
 # that staged copy synchronized on every link so local tuning, packaged builds,

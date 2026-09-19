@@ -232,6 +232,69 @@ just analyze-present out/build/linux-amd64-release/logs/<log>.log 0
 The summary reports sampled vertex-buffer matches, maximum per-frame bytes,
 and missing, dropped, and unmatched counts.
 
+## Compare-only dominant strip batch
+
+`src/native_renderer/native_pass_batch.cpp` implements the next observation
+stage without submitting GPU work. It accepts only the correlated
+`0x8241CD88` signature:
+
+- primitive 6 (`TriangleStrip`);
+- exactly four vertices;
+- 36-byte / 9-dword stride;
+- a complete captured 144-byte payload.
+
+Each guest dword is decoded with the proven `k8in32` byte swap. The native
+vertex contains position `float3` from words 0..2, the word-6 packed color after
+the shader's `zyxw` swizzle, and UV `float2` from words 7..8. Non-finite
+position or UV values reject the complete draw rather than reaching a future
+Vulkan upload.
+
+Independent strips are converted to ordered triangle-list indices:
+
+```text
+0,1,2, 2,1,3
+```
+
+Every subsequent draw starts from a new four-vertex base. This preserves draw
+order without creating the cross-strip triangles that naive vertex
+concatenation would introduce. Source draw indices remain attached for later
+image-comparison diagnostics.
+
+The default-off `mcla_native_batch_compare` flag enables the CPU batch and its
+telemetry. It implicitly enables scene capture but neither submits Vulkan work
+nor suppresses Xenos draws. The Linux/Vulkan smoke test produced:
+
+```text
+native_batch_draws=1625/1628
+batch_vertices=6500
+batch_indices=9750
+batch_unsupported=3
+batch_missing=0
+batch_invalid=0
+```
+
+All six telemetry samples satisfied the partition invariant
+`accepted + unsupported + missing + invalid == candidates` and the topology
+invariants `vertices == accepted * 4` and `indices == accepted * 6`. The three
+unsupported records are the already observed six-vertex TriangleLists. Stable
+intro windows remained at 30.0 FPS; the later scene transition reached 27.9 FPS
+while the candidate count had already fallen to zero, so it is not evidence of
+batch decode cost.
+
+The Release regression test was also exercised with a temporary incorrect final
+index. It failed at the exact topology comparison; after removing the mutation,
+the same test passed. This confirms the topology check is active with `NDEBUG`
+and is not an assertion compiled out of the Release build.
+
+Reproduction:
+
+```sh
+just test-native-batch
+out/build/linux-amd64-release/midnight_club_la \
+  --log_level=info --mcla_native_batch_compare=true
+just analyze-present out/build/linux-amd64-release/logs/<log>.log 0
+```
+
 ## Remaining risks and next evidence
 
 - This finder detects direct `lis` + `ori` constant construction. Dynamically
@@ -240,8 +303,10 @@ and missing, dropped, and unmatched counts.
   `0x8241CD88` vertex contents are now retained. Texture contents and complete
   render-target lifetime/synchronization are not yet owned by the project.
 - The next native prototype may coalesce the 1,625 ordered four-vertex buffers
-  into one host upload and one or a few Vulkan submissions, but it must preserve
-  blend/order semantics and remain a compare-only path until image parity.
+  into one host upload and one or a few Vulkan submissions. The ordered CPU
+  batch and topology conversion are now proven; texture ownership,
+  render-target synchronization, blend state, and offscreen image comparison
+  remain before any native submission or suppression.
 - A native draw is not safe until its shader, vertex/index data, constants,
   textures, render targets, viewport/scissor, synchronization, and fallback
   contract are known.

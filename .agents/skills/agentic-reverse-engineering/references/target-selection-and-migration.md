@@ -98,6 +98,19 @@ fetch layout is substantially stronger than frequency alone. Record the scene
 and executable revision; boot/intro evidence must not be generalized to
 gameplay without another capture.
 
+Before a native submission, make a compare-only CPU batch falsifiable. Filter
+on the complete proven signature rather than a shader hash alone, decode guest
+endianness explicitly, reject malformed or non-finite inputs, and retain source
+draw indices. Partition telemetry should satisfy
+`accepted + unsupported + missing + invalid == candidates`; topology counts
+should also be deterministic. This exposes incorrect assumptions before they
+become Vulkan synchronization or image-parity bugs.
+
+Never concatenate triangle strips as one longer strip unless restart semantics
+are proven. A safe first representation converts every strip independently to
+triangle-list indices while preserving draw order. Add a negative test that
+would fail if a triangle crossed two source draws.
+
 ## Simulation and presentation
 
 Treat guest simulation frequency and host presentation frequency as independent

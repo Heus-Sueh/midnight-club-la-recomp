@@ -74,6 +74,10 @@ mcla_use_native_renderer = true
 # normal play; enable for bounded native-renderer correlation runs.
 # mcla_native_scene_capture = false
 
+# Build an ordered CPU-side batch for the proven dominant strip pass. This is
+# compare-only: it neither submits Vulkan work nor suppresses Xenos draws.
+# mcla_native_batch_compare = false
+
 # Display and internal render resolution preset: 720p, 1080p, 1440p, 4k
 mcla_resolution = "1080p"
 

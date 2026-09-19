@@ -75,6 +75,7 @@ flowchart TD
 | :--- | :--- | :--- |
 | **GPU Milestone** | **Tier 2 Capture Active** | The first DrawPrimitiveUP-style path publishes typed records and frame-owned vertex bytes while Xenos remains the renderer. |
 | **Final Draw-State Trace** | **Complete** | A bounded SDK trace records final state plus shader-used resources; the first measured PM4 frame contained 1,654 draws and five pass signatures. |
+| **Dominant Strip CPU Batch** | **Complete** | A default-off compare path decodes `k8in32` vertices and converts 1,625 independent strips into 6,500 vertices and 9,750 ordered indices without submitting GPU work. |
 | **Frame Pacing** | **Complete** | High-precision monotonic pacing attached to the host clock at `grcDevice::Present`. |
 | **Swap Interception** | **Complete** | Deterministic `mcla_native_present_hook` at `0x8241A0E4` (generated output `generated/default/midnight_club_la_recomp.68.cpp`, not tracked). |
 | **1080p Presentation** | **Complete** | Guest eDRAM remains at 720p while the host window presents at 1080p. |
@@ -166,6 +167,10 @@ commands can eventually map to native Vulkan textures and pipelines.
     six-vertex lists from the same shader pair. The project captured all 1,628
     returned buffers, exactly 234,648 bytes, with zero missing, dropped, or
     unmatched records. It is the current narrow-pass candidate.
+  - The compare-only CPU batch accepts exactly those 1,625 four-vertex strips,
+    decodes their 9-dword layout, and emits independent triangle-list indices.
+    The three six-vertex lists remain unsupported by design. Unit and runtime
+    checks reject cross-strip topology, missing data, and non-finite vertices.
 
 ---
 
@@ -226,13 +231,13 @@ gantt
 
 ### Next Priorities
 
-1. **Build a compare-only ordered batch for the dominant strip pass**
-   - Concatenate the retained `0x8241CD88` payloads in original order and feed a
-     project-owned Vulkan upload path without changing the emulated draw path.
-2. **Own the remaining pass resources**
+1. **Own the remaining pass resources**
    - Map the invariant texture, render-target lifetime, blend semantics, and
      synchronization for `VS 0x88F617431F7D9C9B` /
      `PS 0x46BE7CEEBA3ECD76` without copying unrelated state.
+2. **Submit the batch to an offscreen Vulkan comparison target**
+   - Upload the ordered host vertices and indices without touching the displayed
+     Xenos framebuffer. Capture a deterministic native image for comparison.
 3. **Validate gameplay and image parity**
    - Repeat the correlation in a controlled gameplay scene, image-compare the
      native pass, retain Xenos for every unknown operation, and suppress an

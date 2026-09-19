@@ -18,6 +18,12 @@ test-memory:
 test-tools:
     "{{ python }}" -m unittest discover -s scripts -p "test_*.py"
 
+# Build and run the project-owned C++ native batch regression test.
+test-native-batch:
+    "{{ cmake }}" --preset {{ preset }} -DMCLA_BUILD_TESTS=ON
+    "{{ cmake }}" --build --preset {{ preset }} --target mcla_native_pass_batch_test --parallel
+    "out/build/{{ preset }}/mcla_native_pass_batch_test"
+
 # Configure the selected preset (Vulkan enabled, D3D12 disabled).
 configure:
     "{{ cmake }}" --preset {{ preset }}

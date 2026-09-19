@@ -195,6 +195,18 @@ is a batching candidate; it is not permission to reorder transparent/blended
 draws. Concatenate in original order first, preserve fallback, and validate via
 image comparison before suppressing emulated commands.
 
+Build the host batch without Vulkan first. Decode `k8in32` by byte-swapping
+every fetched dword, follow the shader's actual attribute offsets and result
+swizzles, and reject non-finite float attributes. Keep the host vertex type
+plain and platform-independent so the same code runs on Windows and Linux.
+
+Independent triangle strips need explicit separation. Converting each
+four-vertex strip to `0,1,2, 2,1,3` triangle-list indices preserves winding and
+prevents accidental cross-draw triangles when payloads share one upload. Track
+the source draw index and validate the candidate partition and vertex/index
+count equations before allocating Vulkan resources. A CPU batch is still only
+a compare boundary; it does not justify draw suppression.
+
 ---
 
 ## 6. Tier 2 Practical Implementation Learnings (FSI, Zero-Readback, and AOT Shader Pipeline)

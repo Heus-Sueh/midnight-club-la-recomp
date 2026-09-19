@@ -32,6 +32,15 @@ NATIVE_SCENE_RE = re.compile(
     r"dropped_vertex_buffers=(?P<dropped_buffers>\d+), "
     r"unmatched_vertex_returns=(?P<unmatched>\d+)"
 )
+NATIVE_BATCH_RE = re.compile(
+    r"\[(?:\d{4}-\d{2}-\d{2} )?"
+    r"(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2})\.(?P<millis>\d{3})\]"
+    r".*\[NativeRenderer\] Presentation stats: .*"
+    r"native_batch_draws=(?P<accepted>\d+)/(?P<candidates>\d+), "
+    r"batch_vertices=(?P<vertices>\d+), batch_indices=(?P<indices>\d+), "
+    r"batch_unsupported=(?P<unsupported>\d+), "
+    r"batch_missing=(?P<missing>\d+), batch_invalid=(?P<invalid>\d+)"
+)
 DAY_MS = 24 * 60 * 60 * 1000
 
 
@@ -97,6 +106,30 @@ def parse_native_scene(text: str) -> list[dict[str, int]]:
     return result
 
 
+def parse_native_batch(text: str) -> list[dict[str, int]]:
+    """Return unwrapped timestamps and compare-only native batch counters."""
+    result: list[dict[str, int]] = []
+    day_offset = 0
+    previous_clock_ms: int | None = None
+    for match in NATIVE_BATCH_RE.finditer(text):
+        clock_ms = (
+            int(match.group("hour")) * 3_600_000
+            + int(match.group("minute")) * 60_000
+            + int(match.group("second")) * 1_000
+            + int(match.group("millis"))
+        )
+        if previous_clock_ms is not None and clock_ms < previous_clock_ms:
+            day_offset += DAY_MS
+        sample = {name: int(match.group(name)) for name in (
+            "accepted", "candidates", "vertices", "indices", "unsupported",
+            "missing", "invalid",
+        )}
+        sample["timestamp"] = clock_ms + day_offset
+        result.append(sample)
+        previous_clock_ms = clock_ms
+    return result
+
+
 def percentile(values: list[float], fraction: float) -> float:
     """Nearest-rank percentile for a non-empty sorted sample."""
     rank = max(1, math.ceil(fraction * len(values)))
@@ -152,6 +185,31 @@ def summarize(path: Path, warmup_seconds: float = 0.0) -> dict[str, object]:
                     sample["unmatched"] for sample in scene_samples
                 ),
             })
+        batch_samples = [
+            sample for sample in parse_native_batch(text)
+            if sample["timestamp"] >= cutoff_ms
+        ]
+        if batch_samples:
+            result.update({
+                "native_batch_samples": len(batch_samples),
+                "consistent_batch_samples": sum(
+                    sample["accepted"] + sample["unsupported"]
+                    + sample["missing"] + sample["invalid"]
+                    == sample["candidates"]
+                    and sample["vertices"] == sample["accepted"] * 4
+                    and sample["indices"] == sample["accepted"] * 6
+                    for sample in batch_samples
+                ),
+                "maximum_batch_draws": max(
+                    sample["accepted"] for sample in batch_samples
+                ),
+                "batch_missing_draws": sum(
+                    sample["missing"] for sample in batch_samples
+                ),
+                "batch_invalid_draws": sum(
+                    sample["invalid"] for sample in batch_samples
+                ),
+            })
         return result
 
     cutoff_ms = timestamps[0] + round(warmup_seconds * 1000)
@@ -201,6 +259,14 @@ def format_summary(result: dict[str, object]) -> str:
                 f" missing={result['missing_vertex_buffers']}"
                 f" dropped={result['dropped_vertex_buffers']}"
                 f" unmatched={result['unmatched_vertex_returns']}"
+            )
+        if "native_batch_samples" in result:
+            summary += (
+                f" batch_consistent={result['consistent_batch_samples']}/"
+                f"{result['native_batch_samples']}"
+                f" max_batch_draws={result['maximum_batch_draws']}"
+                f" batch_missing={result['batch_missing_draws']}"
+                f" batch_invalid={result['batch_invalid_draws']}"
             )
         return summary
     return (
