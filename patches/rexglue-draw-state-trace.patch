@@ -1,0 +1,364 @@
+diff --git i/include/rex/graphics/command_processor.h w/include/rex/graphics/command_processor.h
+index da8e432..25bd147 100644
+--- i/include/rex/graphics/command_processor.h
++++ w/include/rex/graphics/command_processor.h
+@@ -138,6 +138,8 @@ class CommandProcessor {
+     size_t length = 0;
+   };
+ 
++  struct DrawStateTrace;
++
+   void WorkerThreadMain();
+   virtual bool SetupContext() = 0;
+   virtual void ShutdownContext() = 0;
+@@ -221,6 +223,11 @@ class CommandProcessor {
+                          IndexBufferInfo* index_buffer_info, bool major_mode_explicit) = 0;
+   virtual bool IssueCopy() = 0;
+ 
++  void TraceDrawState(const char* opcode_name, xenos::PrimitiveType prim_type,
++                      uint32_t index_count, const IndexBufferInfo* index_buffer_info,
++                      bool major_mode_explicit);
++  void FinishDrawStateTraceFrame();
++
+   // "Actual" is for the command processor thread, to be read by the
+   // implementations.
+   SwapPostEffect GetActualSwapPostEffect() const { return swap_post_effect_actual_; }
+@@ -244,6 +251,9 @@ class CommandProcessor {
+   std::vector<uint32_t> me_bin_;
+ 
+   uint32_t counter_ = 0;
++  // Draw-state trace frame identity is advanced only by PM4_XE_SWAP. counter_
++  // also advances on host vblank and therefore cannot delimit command frames.
++  uint64_t draw_state_frame_ = 1;
+ 
+   uint32_t primary_buffer_ptr_ = 0;
+   uint32_t primary_buffer_size_ = 0;
+@@ -266,6 +276,8 @@ class CommandProcessor {
+   Shader* active_vertex_shader_ = nullptr;
+   Shader* active_pixel_shader_ = nullptr;
+ 
++  std::unique_ptr<DrawStateTrace> draw_state_trace_;
++
+   bool paused_ = false;
+ 
+   // By default (such as for tools), post-processing is disabled.
+diff --git i/include/rex/graphics/flags.h w/include/rex/graphics/flags.h
+index 2cf24c4..36cf3c5 100644
+--- i/include/rex/graphics/flags.h
++++ w/include/rex/graphics/flags.h
+@@ -65,6 +65,9 @@ REXCVAR_DECLARE(int32_t, primitive_processor_cache_min_indices);
+ 
+ // GPU Debug
+ REXCVAR_DECLARE(bool, gpu_debug_markers);
++REXCVAR_DECLARE(std::string, gpu_draw_state_trace);
++REXCVAR_DECLARE(int32_t, gpu_draw_state_trace_start_frame);
++REXCVAR_DECLARE(int32_t, gpu_draw_state_trace_frame_count);
+ bool IsGpuDebugMarkersEnabled();
+ 
+ // GPU Alpha Test
+diff --git i/src/graphics/command_processor.cpp w/src/graphics/command_processor.cpp
+index a744375..eba6709 100644
+--- i/src/graphics/command_processor.cpp
++++ w/src/graphics/command_processor.cpp
+@@ -19,11 +19,13 @@
+ 
+ #include <rex/cvar.h>
+ #include <rex/dbg.h>
++#include <rex/filesystem.h>
+ #include <rex/perf/counter.h>
+ #include <rex/chrono/clock.h>
+ #include <rex/graphics/command_processor.h>
+ #include <rex/graphics/flags.h>
+ #include <rex/graphics/graphics_system.h>
++#include <rex/graphics/pipeline/shader/shader.h>
+ #include <rex/graphics/pipeline/texture/info.h>
+ #include <rex/graphics/sampler_info.h>
+ #include <rex/graphics/xenos.h>
+@@ -101,6 +103,21 @@ ReadbackResolveMode ParseReadbackResolveMode(std::string_view value) {
+ 
+ }  // namespace
+ 
++struct CommandProcessor::DrawStateTrace {
++  ~DrawStateTrace() {
++    if (file) {
++      std::fclose(file);
++    }
++  }
++
++  FILE* file = nullptr;
++  uint64_t row_count = 0;
++  uint64_t frame_draw_index = 0;
++  uint64_t current_frame = 0;
++  uint64_t captured_frame_count = 0;
++  bool open_failed = false;
++};
++
+ CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
+                                    system::KernelState* kernel_state)
+     : memory_(graphics_system->memory()),
+@@ -115,6 +132,223 @@ CommandProcessor::CommandProcessor(GraphicsSystem* graphics_system,
+ 
+ CommandProcessor::~CommandProcessor() = default;
+ 
++namespace {
++
++uint64_t HashRegisterRange(const RegisterFile& regs, uint32_t first, uint32_t count) {
++  uint64_t hash = UINT64_C(14695981039346656037);
++  for (uint32_t i = 0; i < count; ++i) {
++    uint32_t value = regs.values[first + i];
++    for (uint32_t byte_index = 0; byte_index < sizeof(value); ++byte_index) {
++      hash ^= uint8_t(value >> (byte_index * 8));
++      hash *= UINT64_C(1099511628211);
++    }
++  }
++  return hash;
++}
++
++void AppendIndexedWords(std::string& output, uint32_t index, const uint32_t* words,
++                        uint32_t word_count) {
++  if (!output.empty()) {
++    output.push_back(';');
++  }
++  fmt::format_to(std::back_inserter(output), "{}:", index);
++  for (uint32_t i = 0; i < word_count; ++i) {
++    fmt::format_to(std::back_inserter(output), "{:08X}", words[i]);
++  }
++}
++
++std::string GetUsedVertexFetches(const RegisterFile& regs, const Shader* shader) {
++  std::string output;
++  if (!shader || !shader->is_ucode_analyzed()) {
++    return output;
++  }
++  const Shader::ConstantRegisterMap& constant_map = shader->constant_register_map();
++  for (uint32_t block = 0; block < rex::countof(constant_map.vertex_fetch_bitmap); ++block) {
++    uint32_t remaining = constant_map.vertex_fetch_bitmap[block];
++    uint32_t bit;
++    while (rex::bit_scan_forward(remaining, &bit)) {
++      remaining &= ~(uint32_t(1) << bit);
++      const uint32_t index = block * 32 + bit;
++      const xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(index);
++      AppendIndexedWords(output, index, &fetch.dword_0, 2);
++    }
++  }
++  return output;
++}
++
++std::string GetUsedTextureFetches(const RegisterFile& regs, const Shader* shader) {
++  std::string output;
++  if (!shader || !shader->is_ucode_analyzed()) {
++    return output;
++  }
++  uint32_t captured_mask = 0;
++  for (const Shader::TextureBinding& binding : shader->texture_bindings()) {
++    const uint32_t index = binding.fetch_constant;
++    const uint32_t bit = uint32_t(1) << index;
++    if (captured_mask & bit) {
++      continue;
++    }
++    captured_mask |= bit;
++    const xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(index);
++    uint32_t words[6];
++    std::memcpy(words, &fetch, sizeof(words));
++    AppendIndexedWords(output, index, words, rex::countof(words));
++  }
++  return output;
++}
++
++std::string GetUsedFloatConstants(const RegisterFile& regs, const Shader* shader,
++                                  uint32_t register_base) {
++  std::string output;
++  if (!shader || !shader->is_ucode_analyzed()) {
++    return output;
++  }
++  const Shader::ConstantRegisterMap& constant_map = shader->constant_register_map();
++  for (uint32_t block = 0; block < rex::countof(constant_map.float_bitmap); ++block) {
++    uint64_t remaining = constant_map.float_bitmap[block];
++    uint32_t bit;
++    while (rex::bit_scan_forward(remaining, &bit)) {
++      remaining &= ~(uint64_t(1) << bit);
++      const uint32_t index = block * 64 + bit;
++      AppendIndexedWords(output, index, &regs.values[register_base + index * 4], 4);
++    }
++  }
++  return output;
++}
++
++}  // namespace
++
++void CommandProcessor::TraceDrawState(const char* opcode_name, xenos::PrimitiveType prim_type,
++                                      uint32_t index_count,
++                                      const IndexBufferInfo* index_buffer_info,
++                                      bool major_mode_explicit) {
++  const std::string& trace_path = REXCVAR_GET(gpu_draw_state_trace);
++  if (trace_path.empty()) {
++    return;
++  }
++
++  const uint64_t frame = draw_state_frame_;
++  const uint64_t start_frame = uint64_t(REXCVAR_GET(gpu_draw_state_trace_start_frame));
++  const uint64_t frame_count = uint64_t(REXCVAR_GET(gpu_draw_state_trace_frame_count));
++  if (frame < start_frame) {
++    return;
++  }
++
++  if (!draw_state_trace_) {
++    draw_state_trace_ = std::make_unique<DrawStateTrace>();
++  }
++  DrawStateTrace& trace = *draw_state_trace_;
++  if (trace.captured_frame_count >= frame_count) {
++    return;
++  }
++  if (!trace.file && !trace.open_failed) {
++    trace.file = rex::filesystem::OpenFile(rex::to_path(trace_path), "w");
++    if (!trace.file) {
++      trace.open_failed = true;
++      REXGPU_ERROR("Unable to open GPU draw-state trace output");
++      return;
++    }
++    std::fputs(
++        "frame,draw,opcode,primitive,index_count,indexed,index_format,index_endian,"
++        "index_guest_base,index_length,major_mode_explicit,vs_hash,ps_hash,fetch_hash,"
++        "float_hash,bool_loop_hash,rb_surface_info,rb_color_info0,rb_color_info1,"
++        "rb_color_info2,rb_color_info3,rb_depth_info,rb_color_mask,rb_colorcontrol,"
++        "rb_depthcontrol,rb_modecontrol,pa_sc_screen_tl,pa_sc_screen_br,"
++        "pa_sc_window_offset,pa_sc_window_tl,pa_sc_window_br,pa_cl_vport_xscale,"
++        "pa_cl_vport_xoffset,pa_cl_vport_yscale,pa_cl_vport_yoffset,"
++        "pa_cl_vport_zscale,pa_cl_vport_zoffset,sq_program_cntl,sq_context_misc,"
++        "pa_cl_clip_cntl,pa_su_sc_mode_cntl,pa_cl_vte_cntl,vgt_output_path_cntl,"
++        "vgt_hos_cntl,vertex_fetches,vs_texture_fetches,ps_texture_fetches,"
++        "vs_float_constants,ps_float_constants\n",
++        trace.file);
++    REXGPU_INFO(
++        "GPU draw-state trace started at or after guest frame {} for {} non-empty frame(s)",
++        start_frame, frame_count);
++  }
++  if (!trace.file) {
++    return;
++  }
++
++  if (trace.current_frame != frame) {
++    trace.current_frame = frame;
++    trace.frame_draw_index = 0;
++  }
++
++  const RegisterFile& regs = *register_file_;
++  const uint64_t vs_hash = active_vertex_shader_ ? active_vertex_shader_->ucode_data_hash() : 0;
++  const uint64_t ps_hash = active_pixel_shader_ ? active_pixel_shader_->ucode_data_hash() : 0;
++  const uint64_t fetch_hash =
++      HashRegisterRange(regs, XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0, 32 * 6);
++  const uint64_t float_hash =
++      HashRegisterRange(regs, XE_GPU_REG_SHADER_CONSTANT_000_X, 512 * 4);
++  uint64_t bool_loop_hash =
++      HashRegisterRange(regs, XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031, 8);
++  bool_loop_hash ^= HashRegisterRange(regs, XE_GPU_REG_SHADER_CONSTANT_LOOP_00, 32);
++
++  const uint32_t indexed = index_buffer_info ? 1 : 0;
++  const uint32_t index_format =
++      index_buffer_info ? uint32_t(index_buffer_info->format) : 0;
++  const uint32_t index_endian =
++      index_buffer_info ? uint32_t(index_buffer_info->endianness) : 0;
++  const uint32_t index_guest_base = index_buffer_info ? index_buffer_info->guest_base : 0;
++  const size_t index_length = index_buffer_info ? index_buffer_info->length : 0;
++  const std::string vertex_fetches = GetUsedVertexFetches(regs, active_vertex_shader_);
++  const std::string vs_texture_fetches = GetUsedTextureFetches(regs, active_vertex_shader_);
++  const std::string ps_texture_fetches = GetUsedTextureFetches(regs, active_pixel_shader_);
++  const std::string vs_float_constants = GetUsedFloatConstants(
++      regs, active_vertex_shader_, XE_GPU_REG_SHADER_CONSTANT_000_X);
++  const std::string ps_float_constants = GetUsedFloatConstants(
++      regs, active_pixel_shader_, XE_GPU_REG_SHADER_CONSTANT_256_X);
++
++  std::fprintf(
++      trace.file,
++      "%" PRIu64 ",%" PRIu64 ",%s,%u,%u,%u,%u,%u,%u,%zu,%u,0x%016" PRIX64
++      ",0x%016" PRIX64 ",0x%016" PRIX64 ",0x%016" PRIX64 ",0x%016" PRIX64
++      ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
++      "%u,%u,%u,%u,%u,%s,%s,%s,%s,%s\n",
++      frame, trace.frame_draw_index++, opcode_name, uint32_t(prim_type), index_count, indexed,
++      index_format, index_endian, index_guest_base, index_length,
++      uint32_t(major_mode_explicit), vs_hash, ps_hash, fetch_hash, float_hash, bool_loop_hash,
++      regs[XE_GPU_REG_RB_SURFACE_INFO], regs[XE_GPU_REG_RB_COLOR_INFO],
++      regs[XE_GPU_REG_RB_COLOR1_INFO], regs[XE_GPU_REG_RB_COLOR2_INFO],
++      regs[XE_GPU_REG_RB_COLOR3_INFO], regs[XE_GPU_REG_RB_DEPTH_INFO],
++      regs[XE_GPU_REG_RB_COLOR_MASK], regs[XE_GPU_REG_RB_COLORCONTROL],
++      regs[XE_GPU_REG_RB_DEPTHCONTROL], regs[XE_GPU_REG_RB_MODECONTROL],
++      regs[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_TL], regs[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR],
++      regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET], regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL],
++      regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR], regs[XE_GPU_REG_PA_CL_VPORT_XSCALE],
++      regs[XE_GPU_REG_PA_CL_VPORT_XOFFSET], regs[XE_GPU_REG_PA_CL_VPORT_YSCALE],
++      regs[XE_GPU_REG_PA_CL_VPORT_YOFFSET], regs[XE_GPU_REG_PA_CL_VPORT_ZSCALE],
++      regs[XE_GPU_REG_PA_CL_VPORT_ZOFFSET], regs[XE_GPU_REG_SQ_PROGRAM_CNTL],
++      regs[XE_GPU_REG_SQ_CONTEXT_MISC], regs[XE_GPU_REG_PA_CL_CLIP_CNTL],
++      regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL], regs[XE_GPU_REG_PA_CL_VTE_CNTL],
++      regs[XE_GPU_REG_VGT_OUTPUT_PATH_CNTL], regs[XE_GPU_REG_VGT_HOS_CNTL],
++      vertex_fetches.c_str(), vs_texture_fetches.c_str(), ps_texture_fetches.c_str(),
++      vs_float_constants.c_str(), ps_float_constants.c_str());
++  ++trace.row_count;
++}
++
++void CommandProcessor::FinishDrawStateTraceFrame() {
++  if (!draw_state_trace_ || !draw_state_trace_->file) {
++    return;
++  }
++
++  DrawStateTrace& trace = *draw_state_trace_;
++  const uint64_t frame = draw_state_frame_;
++  if (trace.current_frame != frame || trace.frame_draw_index == 0) {
++    return;
++  }
++  std::fflush(trace.file);
++  const uint64_t frame_count = uint64_t(REXCVAR_GET(gpu_draw_state_trace_frame_count));
++  ++trace.captured_frame_count;
++  if (trace.captured_frame_count >= frame_count) {
++    std::fclose(trace.file);
++    trace.file = nullptr;
++    REXGPU_INFO("GPU draw-state trace completed with {} draw(s) across {} non-empty frame(s)",
++                trace.row_count, trace.captured_frame_count);
++  }
++}
++
+ bool CommandProcessor::Initialize() {
+   // Initialize the gamma ramps to their default (linear) values - taken from
+   // what games set when starting with the sRGB (return value 1)
+@@ -958,6 +1192,8 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+   uint32_t frontbuffer_height = reader->ReadAndSwap<uint32_t>();
+   reader->AdvanceRead((count - 4) * sizeof(uint32_t));
+ 
++  FinishDrawStateTraceFrame();
++  ++draw_state_frame_;
+   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+ 
+   ++counter_;
+@@ -1380,6 +1616,10 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+           xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type);
+       draw_succeeded = IssueDraw(vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
+                                  is_indexed ? &index_buffer_info : nullptr, major_mode_explicit);
++      TraceDrawState(opcode_name, vgt_draw_initiator.prim_type,
++                     vgt_draw_initiator.num_indices,
++                     is_indexed ? &index_buffer_info : nullptr,
++                     major_mode_explicit);
+       if (!draw_succeeded) {
+         auto vgt_output_path_cntl = register_file_->Get<reg::VGT_OUTPUT_PATH_CNTL>();
+         auto vgt_hos_cntl = register_file_->Get<reg::VGT_HOS_CNTL>();
+diff --git i/src/graphics/flags.cpp w/src/graphics/flags.cpp
+index e2983a4..564e576 100644
+--- i/src/graphics/flags.cpp
++++ w/src/graphics/flags.cpp
+@@ -32,6 +32,17 @@ REXCVAR_DEFINE_BOOL(gpu_debug_markers, false, "GPU",
+                     "Insert debug markers into GPU command streams for tools "
+                     "like PIX and RenderDoc. Automatically enabled when "
+                     "RenderDoc is detected.");
++REXCVAR_DEFINE_STRING(gpu_draw_state_trace, "", "GPU",
++                      "CSV path for a bounded draw-state trace; empty disables tracing")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_INT32(gpu_draw_state_trace_start_frame, 1, "GPU",
++                     "One-based earliest guest frame eligible for draw-state tracing")
++    .range(1, 1000000000)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_INT32(gpu_draw_state_trace_frame_count, 1, "GPU",
++                     "Number of non-empty guest draw frames written to the trace")
++    .range(1, 1000000)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ bool IsGpuDebugMarkersEnabled() {
+   static bool cached = false;

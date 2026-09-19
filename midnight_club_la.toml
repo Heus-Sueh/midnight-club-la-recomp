@@ -49,6 +49,14 @@ clear_memory_page_state = false
 # Shader dump toggle (set to "shaders_dump" to dump microcode shaders for AOT compilation)
 # dump_shaders = "shaders_dump"
 
+# Bounded final Xenos draw-state trace for native-renderer reverse engineering.
+# The start frame is one-based and frame_count counts non-empty draw frames.
+# Keep disabled during normal play because the enabled path hashes shader
+# constants and writes one CSV row per submitted draw.
+# gpu_draw_state_trace = "draw_state.csv"
+# gpu_draw_state_trace_start_frame = 1
+# gpu_draw_state_trace_frame_count = 1
+
 # Input backend
 input_backend = "sdl"
 
@@ -61,6 +69,10 @@ allow_game_relative_writes = true
 # Native Renderer & Presentation Controls
 # Enable native renderer & presentation pipeline
 mcla_use_native_renderer = true
+
+# Observation-only RAGE draw and transient-vertex capture. Keep disabled during
+# normal play; enable for bounded native-renderer correlation runs.
+# mcla_native_scene_capture = false
 
 # Display and internal render resolution preset: 720p, 1080p, 1440p, 4k
 mcla_resolution = "1080p"

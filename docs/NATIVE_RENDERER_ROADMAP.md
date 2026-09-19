@@ -23,7 +23,7 @@ flowchart TD
 
     subgraph Hooks ["Interception Layer (Mid-Assembly Hooks)"]
         Hook_Swap["0x8241A0E4: grcDevice::Present"]
-        Hook_Draw["0x82412990 / PM4: Draw Commands"]
+        Hook_Draw["0x8241CD88: DrawPrimitiveUP-style builder"]
     end
 
     subgraph NativeRenderer ["Native Renderer Module (src/native_renderer/)"]
@@ -73,7 +73,8 @@ flowchart TD
 
 | Component | Status | Details |
 | :--- | :--- | :--- |
-| **GPU Milestone** | **Tier 2 Active** | Established in [`AGENTS.md`](../AGENTS.md), with Fragment Shader Interlock and an AOT pipeline as ongoing targets. |
+| **GPU Milestone** | **Tier 2 Capture Active** | The first DrawPrimitiveUP-style path publishes typed records and frame-owned vertex bytes while Xenos remains the renderer. |
+| **Final Draw-State Trace** | **Complete** | A bounded SDK trace records final state plus shader-used resources; the first measured PM4 frame contained 1,654 draws and five pass signatures. |
 | **Frame Pacing** | **Complete** | High-precision monotonic pacing attached to the host clock at `grcDevice::Present`. |
 | **Swap Interception** | **Complete** | Deterministic `mcla_native_present_hook` at `0x8241A0E4` (generated output `generated/default/midnight_club_la_recomp.68.cpp`, not tracked). |
 | **1080p Presentation** | **Complete** | Guest eDRAM remains at 720p while the host window presents at 1080p. |
@@ -140,9 +141,31 @@ commands can eventually map to native Vulkan textures and pipelines.
   - Convert the captured shaders into validated native SPIR-V modules and make
     them available without runtime translation to reduce compilation stutter.
 - [ ] **Replace PM4 Commands with Native Vulkan Command Buffers**
-  - Intercept the relevant draw path near `0x82412990` only after its calling
-    convention and revision stability are proven, then submit equivalent work
-    to a native `VkCommandBuffer`.
+  - `0x82412990` was rejected: it emits a wait/flush sequence and blocks until
+    the device field at `+0x2B00` becomes zero; it is not a draw boundary.
+  - `sub_82427898` is the first proven draw boundary for the target executable.
+    It emits `0xC0003600` (`PM4_DRAW_INDX_2`) plus a word derived from `r4` and
+    `r5`, then advances the command-buffer pointer at device offset `+0x30`.
+  - The observation-only hook publishes immutable per-frame draw snapshots.
+    Native command recording and emulated draw suppression remain disabled
+    until the packet arguments, surrounding render state, and output parity are
+    proven.
+  - Runtime selection identified `0x8241CD88`, `0x8241D230`, and `0x8241D620`
+    as active logical draw entry points. A Linux/Vulkan smoke test captured up
+    to 1,628 records per frame with zero drops while preserving 30 FPS.
+  - `0x8241CD88` is now a proven DrawPrimitiveUP-style contract: `r4` is the
+    primitive, `r5` is the vertex count, and `r6` is the byte stride. A hook at
+    `0x8241D204` observes the returned guest allocation, and Present copies the
+    completed bytes into a bounded immutable frame slab.
+  - `patches/rexglue-draw-state-trace.patch` captures final command-processor
+    state without suppressing draws. In the first bounded PM4 frame, one
+    four-vertex auto-indexed triangle-strip signature represented 1,625 of
+    1,654 draws (98.2%). All 1,625 draws share shaders, texture, VS constants,
+    render targets, and layout; only their 144-byte vertex addresses vary.
+  - The first correlated scene frame contained 1,625 strips and three
+    six-vertex lists from the same shader pair. The project captured all 1,628
+    returned buffers, exactly 234,648 bytes, with zero missing, dropped, or
+    unmatched records. It is the current narrow-pass candidate.
 
 ---
 
@@ -203,13 +226,14 @@ gantt
 
 ### Next Priorities
 
-1. **FOV and Ultrawide Support in `grcViewport`**
-   - Locate the projection-matrix calculation near `sub_824112C8` or adjacent
-     routines and prove the data flow before adding 21:9 and 32:9 support.
-2. **ImGui Pacing Telemetry**
-   - Display guest update rate, host presentation rate, and frame time in
-     microseconds so pacing can be validated under heavy load.
-3. **Gameplay Shader and Pipeline Coverage**
-   - Capture a deterministic city/race segment, catalog newly encountered
-     shaders, and measure cold-versus-warm pipeline behavior before designing
-     native AOT replacement.
+1. **Build a compare-only ordered batch for the dominant strip pass**
+   - Concatenate the retained `0x8241CD88` payloads in original order and feed a
+     project-owned Vulkan upload path without changing the emulated draw path.
+2. **Own the remaining pass resources**
+   - Map the invariant texture, render-target lifetime, blend semantics, and
+     synchronization for `VS 0x88F617431F7D9C9B` /
+     `PS 0x46BE7CEEBA3ECD76` without copying unrelated state.
+3. **Validate gameplay and image parity**
+   - Repeat the correlation in a controlled gameplay scene, image-compare the
+     native pass, retain Xenos for every unknown operation, and suppress an
+     emulated draw only after parity and fallback recovery are validated.

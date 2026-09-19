@@ -16,6 +16,7 @@ include(generated/rexglue.cmake)
 set(MIDNIGHTCLUBLA_SOURCES
     src/main.cpp
     src/native_renderer/native_renderer.cpp
+    src/native_renderer/native_scene.cpp
     src/native_renderer/camera_interpolator.cpp
 )
 

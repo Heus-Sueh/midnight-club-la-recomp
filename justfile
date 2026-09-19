@@ -75,3 +75,11 @@ extract-game iso:
 # Reuse the local Ghidra analysis for one explicit guest address.
 ghidra address:
     "{{ python }}" scripts/ghidra/analyze_xex.py --no-analysis --address {{ address }}
+
+# Locate direct PM4 draw-packet builders in ignored generated code.
+find-pm4-draws:
+    "{{ python }}" scripts/find_pm4_draw_builders.py
+
+# Rank repeated Xenos state signatures from a bounded SDK draw trace.
+analyze-draw-state trace top="10":
+    "{{ python }}" scripts/analyze_draw_state_trace.py "{{ trace }}" --top {{ top }}

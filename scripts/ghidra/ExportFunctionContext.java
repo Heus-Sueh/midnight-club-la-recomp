@@ -50,6 +50,14 @@ public class ExportFunctionContext extends GhidraScript {
             if (function == null) {
                 function = currentProgram.getFunctionManager().getFunctionContaining(address);
             }
+            if (function == null) {
+                disassemble(address);
+                function = createFunction(address, null);
+            }
+            if (function == null) {
+                index.append(arguments[position]).append(" not-found\n");
+                continue;
+            }
 
             FunctionIterator followingFunctions = currentProgram.getFunctionManager()
                 .getFunctions(function.getEntryPoint().add(1), true);
@@ -91,11 +99,6 @@ public class ExportFunctionContext extends GhidraScript {
                     repairedPrologueFallthrough = true;
                 }
             }
-            if (function == null) {
-                index.append(arguments[position]).append(" not-found\n");
-                continue;
-            }
-
             String stem = String.format("%08X_%s", rawAddress, safeName(function.getName()));
             StringBuilder assembly = new StringBuilder();
             assembly.append("name=").append(function.getName()).append('\n');

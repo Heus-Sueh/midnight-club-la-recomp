@@ -20,6 +20,9 @@ REXCVAR_DECLARE(int32_t, mcla_resolution_scale);
 REXCVAR_DECLARE(bool, mcla_dump_shaders);
 REXCVAR_DECLARE(bool, mcla_use_fsi);
 REXCVAR_DECLARE(bool, mcla_interpolate_camera);
+REXCVAR_DECLARE(bool, mcla_native_scene_capture);
+REXCVAR_DECLARE(int32_t, mcla_capture_present);
+REXCVAR_DECLARE(std::string, mcla_capture_path);
 
 class NativeRenderer {
  public:
@@ -37,11 +40,14 @@ class NativeRenderer {
   ~NativeRenderer() = default;
 
   void SampleGuestCamera();
+  void CaptureDiagnosticFrame();
 
   rex::Runtime* runtime_ = nullptr;
   rex::ui::Window* window_ = nullptr;
   bool initialized_ = false;
   uint64_t guest_frame_count_ = 0;
+  uint64_t total_guest_frame_count_ = 0;
+  bool diagnostic_frame_captured_ = false;
   std::chrono::steady_clock::time_point next_present_time_{};
   std::chrono::steady_clock::time_point last_report_time_{};
 };

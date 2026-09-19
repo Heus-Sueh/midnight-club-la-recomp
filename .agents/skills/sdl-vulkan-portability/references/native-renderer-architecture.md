@@ -149,6 +149,52 @@ Recompilation projects approach native rendering across three distinct tiers dep
    - Identify RAGE graphics subsystems in MCLA: `grcDevice`, `grcViewport`, `rmcDrawable`, `rmcMesh`.
    - Extract vertex/index buffers and submit directly to Vulkan command buffers.
 
+### MCLA hybrid starting point
+
+For the target XEX hash recorded in `AGENTS.md`, `sub_82427898` is a proven
+direct `PM4_DRAW_INDX_2` builder. The project captures its raw `r3/r4/r5`
+inputs into an immutable scene at Present while leaving the packet and
+`rexgpu-xenos` behavior unchanged. `sub_82412990` is a rejected draw boundary;
+it performs ring-buffer synchronization/wait behavior instead.
+
+This is the safe bridge between Tier 2 and Tier 3: preserve raw command evidence
+like Unleashed, publish frame-owned immutable state like Skate3, and retain the
+Dante-style fallback principle. Do not enable draw suppression until the
+corresponding native pass has complete resource/state coverage and image parity.
+
+### Backend-final state tracing
+
+For an incremental Vulkan migration, a default-off trace immediately before the
+emulated backend's `IssueDraw` is a useful truth boundary. Capture raw Xenos
+state and shader hashes there, then cluster draws offline by shader pair,
+primitive, render targets, viewport/scissor, and program control. Exclude
+per-object fetch/constant hashes from the cluster key so repeated passes remain
+visible.
+
+Use a command-stream swap counter for trace frame boundaries. Host vblank may
+advance an emulator's general counter independently, and copy-only frames may
+have no draw calls. Count only non-empty draw frames so short captures remain
+deterministic across Windows and Linux. The trace must be disabled by default,
+must not alter draw submission, and should use portable file APIs for Unicode
+paths.
+
+### Transient vertex uploads at the guest/native boundary
+
+DrawPrimitiveUP-style engine helpers often return a guest allocation that the
+caller fills after the helper has already emitted its command. Capture the
+returned guest address at the proven post-assignment instruction, but defer the
+copy until Present or another lifetime boundary after the caller has written
+the data. Publish a single bounded byte slab with integer offsets in the
+immutable scene. This keeps snapshots portable across Windows and Linux,
+avoids dangling guest pointers, and prevents one heap allocation per draw.
+
+Before building a native batch, require the engine byte formula to agree with
+the backend fetch constant and shader layout. A repeated pass with invariant
+pipeline, texture, constants, render targets, and 144-byte four-vertex uploads
+is a batching candidate; it is not permission to reorder transparent/blended
+draws. Concatenate in original order first, preserve fallback, and validate via
+image comparison before suppressing emulated commands.
+
 ---
 
 ## 6. Tier 2 Practical Implementation Learnings (FSI, Zero-Readback, and AOT Shader Pipeline)

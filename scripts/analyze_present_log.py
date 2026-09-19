@@ -21,6 +21,17 @@ NATIVE_FPS_RE = re.compile(
     r"(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2})\.(?P<millis>\d{3})\]"
     r".*\[NativeRenderer\] Presentation stats: guest_fps=(?P<fps>[0-9]+(?:\.[0-9]+)?)"
 )
+NATIVE_SCENE_RE = re.compile(
+    r"\[(?:\d{4}-\d{2}-\d{2} )?"
+    r"(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2})\.(?P<millis>\d{3})\]"
+    r".*\[NativeRenderer\] Presentation stats: .*"
+    r"native_scene_draws=(?P<draws>\d+), dropped_draws=(?P<dropped_draws>\d+), "
+    r"vertex_buffers=(?P<captured>\d+)/(?P<expected>\d+), "
+    r"vertex_bytes=(?P<bytes>\d+), "
+    r"missing_vertex_buffers=(?P<missing>\d+), "
+    r"dropped_vertex_buffers=(?P<dropped_buffers>\d+), "
+    r"unmatched_vertex_returns=(?P<unmatched>\d+)"
+)
 DAY_MS = 24 * 60 * 60 * 1000
 
 
@@ -62,6 +73,30 @@ def parse_native_fps(text: str) -> list[tuple[int, float]]:
     return result
 
 
+def parse_native_scene(text: str) -> list[dict[str, int]]:
+    """Return unwrapped timestamps and native scene snapshot counters."""
+    result: list[dict[str, int]] = []
+    day_offset = 0
+    previous_clock_ms: int | None = None
+    for match in NATIVE_SCENE_RE.finditer(text):
+        clock_ms = (
+            int(match.group("hour")) * 3_600_000
+            + int(match.group("minute")) * 60_000
+            + int(match.group("second")) * 1_000
+            + int(match.group("millis"))
+        )
+        if previous_clock_ms is not None and clock_ms < previous_clock_ms:
+            day_offset += DAY_MS
+        sample = {name: int(match.group(name)) for name in (
+            "draws", "dropped_draws", "captured", "expected", "bytes",
+            "missing", "dropped_buffers", "unmatched",
+        )}
+        sample["timestamp"] = clock_ms + day_offset
+        result.append(sample)
+        previous_clock_ms = clock_ms
+    return result
+
+
 def percentile(values: list[float], fraction: float) -> float:
     """Nearest-rank percentile for a non-empty sorted sample."""
     rank = max(1, math.ceil(fraction * len(values)))
@@ -80,7 +115,7 @@ def summarize(path: Path, warmup_seconds: float = 0.0) -> dict[str, object]:
         if len(fps_values) < 2:
             raise ValueError("fewer than two NativeRenderer FPS reports remain after warm-up")
         ordered_fps = sorted(fps_values)
-        return {
+        result: dict[str, object] = {
             "path": str(path),
             "source": "native_renderer_windows",
             "warmup_seconds": warmup_seconds,
@@ -93,6 +128,31 @@ def summarize(path: Path, warmup_seconds: float = 0.0) -> dict[str, object]:
             "below_30_fps": sum(value < 29.95 for value in fps_values),
             "below_25_fps": sum(value < 25.0 for value in fps_values),
         }
+        scene_samples = [
+            sample for sample in parse_native_scene(text)
+            if sample["timestamp"] >= cutoff_ms
+        ]
+        if scene_samples:
+            result.update({
+                "scene_capture_samples": len(scene_samples),
+                "vertex_buffer_match_samples": sum(
+                    sample["captured"] == sample["expected"]
+                    for sample in scene_samples
+                ),
+                "maximum_vertex_bytes": max(
+                    sample["bytes"] for sample in scene_samples
+                ),
+                "missing_vertex_buffers": sum(
+                    sample["missing"] for sample in scene_samples
+                ),
+                "dropped_vertex_buffers": sum(
+                    sample["dropped_buffers"] for sample in scene_samples
+                ),
+                "unmatched_vertex_returns": sum(
+                    sample["unmatched"] for sample in scene_samples
+                ),
+            })
+        return result
 
     cutoff_ms = timestamps[0] + round(warmup_seconds * 1000)
     filtered = [timestamp for timestamp in timestamps if timestamp >= cutoff_ms]
@@ -126,13 +186,23 @@ def summarize(path: Path, warmup_seconds: float = 0.0) -> dict[str, object]:
 
 def format_summary(result: dict[str, object]) -> str:
     if result["source"] == "native_renderer_windows":
-        return (
+        summary = (
             f"{result['path']}: windows={result['windows']} "
             f"fps={result['average_fps']:.2f} p50={result['p50_fps']:.1f} "
             f"p05={result['p05_fps']:.1f} min={result['minimum_fps']:.1f} "
             f"max={result['maximum_fps']:.1f} <30={result['below_30_fps']} "
             f"<25={result['below_25_fps']}"
         )
+        if "scene_capture_samples" in result:
+            summary += (
+                f" scene_buffers={result['vertex_buffer_match_samples']}/"
+                f"{result['scene_capture_samples']} matched"
+                f" max_vertex_bytes={result['maximum_vertex_bytes']}"
+                f" missing={result['missing_vertex_buffers']}"
+                f" dropped={result['dropped_vertex_buffers']}"
+                f" unmatched={result['unmatched_vertex_returns']}"
+            )
+        return summary
     return (
         f"{result['path']}: presents={result['presents']} "
         f"fps={result['average_fps']:.2f} avg={result['average_ms']:.3f}ms "

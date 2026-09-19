@@ -1,21 +1,94 @@
 #include "native_renderer/native_renderer.h"
 #include "native_renderer/camera_interpolator.h"
+#include "native_renderer/native_scene.h"
 #ifdef MCLA_ENABLE_HOTSPOT_PROBE
 #include "hotspot_probe.h"
 #endif
 
 #include <chrono>
-#include <thread>
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <thread>
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
+#include <rex/ppc/context.h>
+#include <rex/ui/presenter.h>
 
 // Mid-assembly hook target at RAGE grcDevice::Present (0x8241A0E4)
 void mcla_native_present_hook() {
   mcla::NativeRenderer::Get().OnGuestPresent();
+}
+
+// Observation-only hook at the entry of the proven DRAW_INDX_2 packet builder
+// (0x82427898). It preserves r3/r4/r5 and lets the original guest function emit
+// the packet normally, so rexgpu-xenos remains the authoritative renderer.
+void mcla_native_draw_indx2_hook(PPCRegister& r3, PPCRegister& r4, PPCRegister& r5) {
+  if (mcla::FLAGS_mcla_native_scene_capture_storage_()) {
+    mcla::NativeSceneCapture::Get().ObserveBuilderCall(0x82427898);
+    mcla::NativeSceneCapture::Get().ObserveDrawIndx2(r3.u32, r4.u32, r5.u32);
+  }
+}
+
+#define MCLA_DEFINE_DRAW_BUILDER_PROBE(name, address)              \
+  void name() {                                                    \
+    if (mcla::FLAGS_mcla_native_scene_capture_storage_()) {        \
+      mcla::NativeSceneCapture::Get().ObserveBuilderCall(address); \
+    }                                                              \
+  }
+
+MCLA_DEFINE_DRAW_BUILDER_PROBE(mcla_draw_builder_82413068_hook, 0x82413068)
+MCLA_DEFINE_DRAW_BUILDER_PROBE(mcla_draw_builder_82417538_hook, 0x82417538)
+MCLA_DEFINE_DRAW_BUILDER_PROBE(mcla_draw_builder_82418350_hook, 0x82418350)
+MCLA_DEFINE_DRAW_BUILDER_PROBE(mcla_draw_builder_82422488_hook, 0x82422488)
+MCLA_DEFINE_DRAW_BUILDER_PROBE(mcla_draw_builder_824225e0_hook, 0x824225E0)
+MCLA_DEFINE_DRAW_BUILDER_PROBE(mcla_draw_builder_8242de08_hook, 0x8242DE08)
+
+#undef MCLA_DEFINE_DRAW_BUILDER_PROBE
+
+void mcla_draw_builder_8241cd88_hook(PPCRegister& r3, PPCRegister& r4,
+                                     PPCRegister& r5, PPCRegister& r6) {
+  if (!mcla::FLAGS_mcla_native_scene_capture_storage_()) {
+    return;
+  }
+  mcla::NativeSceneCapture::Get().ObserveBuilderCall(0x8241CD88);
+  mcla::NativeSceneCapture::Get().ObserveDrawCall(
+      0x8241CD88, 0xC0012201, r3.u32, r4.u32, r5.u32, r6.u32, 0,
+      ((r5.u32 & 0xFFFFu) << 16) | (r4.u32 & 0x3Fu) | 0x80u);
+}
+
+// Observation-only hook immediately after 0x8241D200 has moved the returned
+// guest vertex allocation into r3. The caller fills this allocation after the
+// function returns, so the bytes are deliberately copied later at Present.
+void mcla_draw_builder_8241cd88_return_hook(PPCRegister& r3) {
+  if (mcla::FLAGS_mcla_native_scene_capture_storage_()) {
+    mcla::NativeSceneCapture::Get().ObserveDrawPrimitiveUpReturn(r3.u32);
+  }
+}
+
+void mcla_draw_builder_8241d230_hook(PPCRegister& r3, PPCRegister& r4,
+                                     PPCRegister& r5, PPCRegister& r6) {
+  if (!mcla::FLAGS_mcla_native_scene_capture_storage_()) {
+    return;
+  }
+  mcla::NativeSceneCapture::Get().ObserveBuilderCall(0x8241D230);
+  mcla::NativeSceneCapture::Get().ObserveDrawCall(
+      0x8241D230, 0xC0012201, r3.u32, r4.u32, r5.u32, r6.u32, 0,
+      ((r6.u32 & 0xFFFFu) << 16) | (r4.u32 & 0x3Fu) | 0x80u);
+}
+
+void mcla_draw_builder_8241d620_hook(PPCRegister& r3, PPCRegister& r4,
+                                     PPCRegister& r5, PPCRegister& r6,
+                                     PPCRegister& r7) {
+  if (!mcla::FLAGS_mcla_native_scene_capture_storage_()) {
+    return;
+  }
+  mcla::NativeSceneCapture::Get().ObserveBuilderCall(0x8241D620);
+  mcla::NativeSceneCapture::Get().ObserveDrawCall(
+      0x8241D620, 0xC0032201, r3.u32, r4.u32, r5.u32, r6.u32, r7.u32,
+      0);
 }
 
 namespace mcla {
@@ -40,6 +113,20 @@ REXCVAR_DEFINE_BOOL(mcla_smooth_motion, true, "Graphics",
 REXCVAR_DEFINE_BOOL(mcla_interpolate_camera, false, "Graphics",
                     "Experimental guest camera sampling prototype (does not alter rendering yet)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(mcla_native_scene_capture, false, "Graphics/Native Renderer",
+                    "Capture proven RAGE draw submissions into immutable frame scenes")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(mcla_capture_present, 0, "Graphics/Diagnostics",
+                     "Capture the first guest output at or after this absolute "
+                     "Present number (0 = disabled)")
+    .range(0, 1000000)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_STRING(mcla_capture_path, "mcla-frame.ppm", "Graphics/Diagnostics",
+                      "PPM output path used by mcla_capture_present")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_DOUBLE(mcla_aspect_ratio, 0.0, "Graphics",
                       "Target aspect ratio (0.0 = auto 16:9, 2.333 = 21:9 ultrawide, 3.555 = 32:9)")
@@ -198,6 +285,18 @@ void NativeRenderer::OnGuestPresent() {
     return;
   }
   ++guest_frame_count_;
+  ++total_guest_frame_count_;
+
+  if (REXCVAR_GET(mcla_native_scene_capture)) {
+    NativeSceneCapture::Get().PublishFrame(
+        total_guest_frame_count_, runtime_ ? runtime_->memory() : nullptr);
+  }
+
+  const int32_t capture_present = REXCVAR_GET(mcla_capture_present);
+  if (!diagnostic_frame_captured_ && capture_present > 0 &&
+      total_guest_frame_count_ >= static_cast<uint64_t>(capture_present)) {
+    CaptureDiagnosticFrame();
+  }
 
   // Sample guest camera for 1 kHz motion interpolation
   if (REXCVAR_GET(mcla_interpolate_camera)) {
@@ -212,9 +311,24 @@ void NativeRenderer::OnGuestPresent() {
     auto elapsed = std::chrono::duration<double>(now - last_report_time_).count();
     if (elapsed >= 5.0) {
       double guest_fps = static_cast<double>(guest_frame_count_) / elapsed;
-      REXLOG_INFO("[NativeRenderer] Presentation stats: guest_fps={:.1f}, frames={}, camera_sampling={}",
-                  guest_fps, guest_frame_count_,
-                  CameraInterpolator::Get().HasValidHistory() ? "active" : "standby");
+      const auto native_scene = NativeSceneCapture::Get().AcquireLatest();
+      REXLOG_INFO(
+          "[NativeRenderer] Presentation stats: guest_fps={:.1f}, frames={}, "
+          "camera_sampling={}, native_scene_draws={}, dropped_draws={}, "
+          "vertex_buffers={}/{}, vertex_bytes={}, missing_vertex_buffers={}, "
+          "dropped_vertex_buffers={}, unmatched_vertex_returns={}",
+          guest_fps, guest_frame_count_, CameraInterpolator::Get().HasValidHistory() ? "active" : "standby",
+          native_scene ? native_scene->draws.size() : 0,
+          native_scene ? native_scene->dropped_draws : 0,
+          native_scene ? native_scene->captured_vertex_buffers : 0,
+          native_scene ? native_scene->expected_vertex_buffers : 0,
+          native_scene ? native_scene->vertex_data.size() : 0,
+          native_scene ? native_scene->missing_vertex_buffers : 0,
+          native_scene ? native_scene->dropped_vertex_buffers : 0,
+          native_scene ? native_scene->unmatched_vertex_returns : 0);
+      for (const NativeBuilderActivity& activity : NativeSceneCapture::Get().DrainBuilderActivity()) {
+        REXLOG_INFO("[NativeRenderer] PM4 builder 0x{:08X}: calls={}", activity.source_address, activity.calls);
+      }
 #ifdef MCLA_ENABLE_HOTSPOT_PROBE
       ReportHotspotProbe(elapsed);
 #endif
@@ -260,6 +374,44 @@ void NativeRenderer::OnGuestPresent() {
   next_present_time_ += interval;
 }
 
+void NativeRenderer::CaptureDiagnosticFrame() {
+  rex::ui::Presenter* presenter =
+      runtime_ && runtime_->graphics_system() ? runtime_->graphics_system()->presenter() : nullptr;
+  if (!presenter) {
+    return;
+  }
+
+  rex::ui::RawImage image;
+  if (!presenter->CaptureGuestOutput(image) || image.width == 0 ||
+      image.height == 0 || image.stride < size_t(image.width) * 4) {
+    return;
+  }
+
+  const std::string& path = REXCVAR_GET(mcla_capture_path);
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output) {
+    REXLOG_ERROR("[NativeRenderer] Failed to open diagnostic capture: {}", path);
+    diagnostic_frame_captured_ = true;
+    return;
+  }
+
+  output << "P6\n" << image.width << ' ' << image.height << "\n255\n";
+  for (uint32_t y = 0; y < image.height; ++y) {
+    const uint8_t* row = image.data.data() + size_t(y) * image.stride;
+    for (uint32_t x = 0; x < image.width; ++x) {
+      output.write(reinterpret_cast<const char*>(row + size_t(x) * 4), 3);
+    }
+  }
+
+  diagnostic_frame_captured_ = true;
+  if (output) {
+    REXLOG_INFO("[NativeRenderer] Captured guest Present {} to {} ({}x{})",
+                total_guest_frame_count_, path, image.width, image.height);
+  } else {
+    REXLOG_ERROR("[NativeRenderer] Failed while writing diagnostic capture: {}", path);
+  }
+}
+
 void NativeRenderer::OnWindowResize(uint32_t width, uint32_t height) {
   if (width == 0 || height == 0) {
     return;
@@ -277,6 +429,10 @@ void NativeRenderer::Shutdown() {
   initialized_ = false;
   runtime_ = nullptr;
   window_ = nullptr;
+  guest_frame_count_ = 0;
+  total_guest_frame_count_ = 0;
+  diagnostic_frame_captured_ = false;
+  NativeSceneCapture::Get().Reset();
 }
 
 }  // namespace mcla

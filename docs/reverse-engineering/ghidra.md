@@ -43,6 +43,10 @@ Use `--no-analysis` only after the same hashed project has already completed
 analysis. Increase `--analysis-timeout` for a slow host. The Java post-script is
 ordinary repository code and can be extended with narrowly scoped queries when
 an investigation needs callers, callees, data references, or type evidence.
+If an address exists in generated code but is missing from Ghidra's function
+table, the focused exporter now disassembles that address and attempts to create
+a local function before continuing. A failed creation is recorded as
+`not-found` instead of aborting the remaining batch.
 
 XEXLoaderWV can initially define some functions as an 8-byte body when their
 first two instructions call a shared `__savegprlr_*` prologue. For a focused

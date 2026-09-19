@@ -121,3 +121,69 @@ name = "sub_827B4B78"
 [[midasm_hook]]
 address = 0x8241a0e4
 name = "mcla_native_present_hook"
+
+# Native scene capture boundary for the target XEX SHA-256
+# c386f4001fa569e6ad4b982f441f67412f00b3f47c166134555cd4b59854a432.
+# At function entry r3 is the RAGE device/command-buffer owner. The original
+# function emits 0xC0003600 followed by ((r5 & 0xffff) << 16) | r4 | 0x80 and
+# advances *(r3 + 0x30). This observation hook preserves all registers and
+# control flow; rexgpu-xenos still consumes and renders the packet.
+[[midasm_hook]]
+address = 0x82427898
+name = "mcla_native_draw_indx2_hook"
+registers = ["r3", "r4", "r5"]
+
+# Unpromoted candidate probes count function entries only. Several functions
+# emit more than one conditional packet, so these counts select the next exact
+# emission site to instrument; they are not native draw records. The three
+# hooks with register lists below have proven entry contracts and also publish
+# raw draw records.
+[[midasm_hook]]
+address = 0x82413068
+name = "mcla_draw_builder_82413068_hook"
+
+[[midasm_hook]]
+address = 0x82417538
+name = "mcla_draw_builder_82417538_hook"
+
+[[midasm_hook]]
+address = 0x82418350
+name = "mcla_draw_builder_82418350_hook"
+
+[[midasm_hook]]
+address = 0x8241cd88
+name = "mcla_draw_builder_8241cd88_hook"
+registers = ["r3", "r4", "r5", "r6"]
+
+# Proven DrawPrimitiveUP-style return contract for 0x8241CD88: r4 is the
+# primitive type, r5 is the vertex count, and r6 is the byte stride. The
+# builder allocates r5*r6 bytes and 0x8241D200 moves that guest address into
+# r3. At 0x8241D204 the allocation is observable, but its contents are copied
+# only at Present after the caller has populated it. This hook changes neither
+# registers nor control flow.
+[[midasm_hook]]
+address = 0x8241d204
+name = "mcla_draw_builder_8241cd88_return_hook"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x8241d230
+name = "mcla_draw_builder_8241d230_hook"
+registers = ["r3", "r4", "r5", "r6"]
+
+[[midasm_hook]]
+address = 0x8241d620
+name = "mcla_draw_builder_8241d620_hook"
+registers = ["r3", "r4", "r5", "r6", "r7"]
+
+[[midasm_hook]]
+address = 0x82422488
+name = "mcla_draw_builder_82422488_hook"
+
+[[midasm_hook]]
+address = 0x824225e0
+name = "mcla_draw_builder_824225e0_hook"
+
+[[midasm_hook]]
+address = 0x8242de08
+name = "mcla_draw_builder_8242de08_hook"
