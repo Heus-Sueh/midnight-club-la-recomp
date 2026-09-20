@@ -76,6 +76,7 @@ flowchart TD
 | **GPU Milestone** | **Tier 2 Capture Active** | The first DrawPrimitiveUP-style path publishes typed records and frame-owned vertex bytes while Xenos remains the renderer. |
 | **Final Draw-State Trace** | **Complete** | A bounded SDK trace records final state plus SDK-resolved texture/sampler resources and blend state. Three measured PM4 frames reproduced the dominant pass at exactly 1,625 draws per frame. |
 | **Dominant Strip CPU Batch** | **Complete** | A default-off compare path decodes `k8in32` vertices and converts 1,625 independent strips into 6,500 vertices and 9,750 ordered indices without submitting GPU work. |
+| **Texture Provenance** | **Complete for intro pass** | `0x1BB40000..0x1BB4FFFF` is CPU-uploaded with no observed GPU writes. It is stable during the intro pass, then dynamically reused by CPU updates. |
 | **Frame Pacing** | **Complete** | High-precision monotonic pacing attached to the host clock at `grcDevice::Present`. |
 | **Swap Interception** | **Complete** | Deterministic `mcla_native_present_hook` at `0x8241A0E4` (generated output `generated/default/midnight_club_la_recomp.68.cpp`, not tracked). |
 | **1080p Presentation** | **Complete** | Guest eDRAM remains at 720p while the host window presents at 1080p. |
@@ -176,6 +177,16 @@ commands can eventually map to native Vulkan textures and pipelines.
     sampling, standard source-alpha blending, alpha-not-zero testing, and
     reversed greater-equal depth test/write into a 1280-pixel RGBA8 target.
     Descriptor stability is proven; texture-content coherence is not.
+  - A physical-range provenance trace subsequently proved the intro texture is
+    CPU-authored and directly uploadable without GPU readback. A late capture
+    found no reference to that range and no 1,625-strip signature, so this pass
+    is retained as an implementation prototype rather than a gameplay FPS
+    target.
+  - PM4 frames 900..902 contained 19,512 draws. Auto-indexed quad lists using
+    `VS 0x4D181C0D99016B72` / `PS 0xEEFF113E5FD82321` contributed 44.7%, and
+    indexed triangle lists using `VS 0x3B5E093D268B22F5` /
+    `PS 0x93307A3906A73EF9` contributed 36.4%. The narrower quad-list pass is the
+    next active-scene correlation target.
 
 ---
 
@@ -236,15 +247,17 @@ gantt
 
 ### Next Priorities
 
-1. **Prove texture-content lifetime and synchronization**
-   - Determine whether physical `0x1BB40000..0x1BB4FFFF` is CPU-uploaded,
-     GPU-resolved, or aliased before the dominant pass. Capture a bounded
-     content identity only at a proven coherent boundary; descriptor stability
-     alone is insufficient.
-2. **Submit the batch to an offscreen Vulkan comparison target**
-   - Upload the ordered host vertices and indices without touching the displayed
-     Xenos framebuffer. Capture a deterministic native image for comparison.
-3. **Validate gameplay and image parity**
+1. **Correlate the late-scene quad-list pass**
+   - Locate its high-level RAGE submission boundary, prove vertex/count/layout
+     contracts, and repeat the capture in a deterministic gameplay route. Keep
+     the emulated path authoritative.
+2. **Build a compare-only CPU batch for the quad-list pass**
+   - Preserve draw order and per-material resources; do not generalize the
+     intro strip batch to different topology or lifetime rules.
+3. **Submit a proven batch to an offscreen Vulkan comparison target**
+   - Upload native vertices, indices, and CPU-authored textures without touching
+     the displayed Xenos framebuffer.
+4. **Validate gameplay and image parity**
    - Repeat the correlation in a controlled gameplay scene, image-compare the
      native pass, retain Xenos for every unknown operation, and suppress an
      emulated draw only after parity and fallback recovery are validated.

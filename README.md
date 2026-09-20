@@ -189,9 +189,13 @@ git -C thirdparty/rexglue-sdk apply ../../patches/rexglue-physical-access-profil
 git -C thirdparty/rexglue-sdk apply \
   ../../patches/rexglue-shared-memory-invalidation-granularity.patch
 git -C thirdparty/rexglue-sdk apply \
+  ../../patches/rexglue-physical-range-trace.patch
+git -C thirdparty/rexglue-sdk apply \
   ../../patches/rexglue-vulkan-draw-bypass-diagnostic.patch
 git -C thirdparty/rexglue-sdk apply \
   ../../patches/rexglue-render-target-profiling.patch
+git -C thirdparty/rexglue-sdk apply \
+  ../../patches/rexglue-draw-state-trace.patch
 ```
 
 ## Extract the game

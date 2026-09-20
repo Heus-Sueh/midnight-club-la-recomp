@@ -89,3 +89,7 @@ find-pm4-draws:
 # Rank repeated Xenos state signatures from a bounded SDK draw trace.
 analyze-draw-state trace top="10":
     "{{ python }}" scripts/analyze_draw_state_trace.py "{{ trace }}" --top {{ top }}
+
+# Classify the producer of a bounded physical GPU-memory range trace.
+analyze-physical-range trace:
+    "{{ python }}" scripts/analyze_physical_range_trace.py "{{ trace }}"

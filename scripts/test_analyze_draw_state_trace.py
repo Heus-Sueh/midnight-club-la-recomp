@@ -82,6 +82,7 @@ class DrawStateTraceAnalysisTests(unittest.TestCase):
         self.assertEqual(result["unique_pass_signatures"], 2)
         dominant = result["top_pass_signatures"][0]
         self.assertEqual(dominant["draws"], 2)
+        self.assertEqual(dominant["primitive_name"], "triangle_list")
         self.assertEqual(dominant["min_index_count"], 36)
         self.assertEqual(dominant["max_index_count"], 72)
         self.assertEqual(dominant["unique_vertex_fetches"], 1)

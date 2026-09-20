@@ -142,6 +142,21 @@ COMPARE_NAMES = {
     6: "greater_equal",
     7: "always",
 }
+PRIMITIVE_NAMES = {
+    0: "none",
+    1: "point_list",
+    2: "line_list",
+    3: "line_strip",
+    4: "triangle_list",
+    5: "triangle_fan",
+    6: "triangle_strip",
+    7: "triangle_with_w_flags",
+    8: "rectangle_list",
+    12: "line_loop",
+    13: "quad_list",
+    14: "quad_strip",
+    15: "polygon",
+}
 
 
 def _signature(row: dict[str, str]) -> tuple[str, ...]:
@@ -313,6 +328,8 @@ def summarize(rows: Iterable[dict[str, str]], top: int = 10) -> dict[str, object
             },
             **values,
         }
+        primitive = int(values["primitive"], 0)
+        item["primitive_name"] = PRIMITIVE_NAMES.get(primitive, f"unknown_{primitive}")
         if len(resources["ps_texture_infos"]) == 1:
             item["resolved_ps_textures"] = parse_texture_infos(
                 next(iter(resources["ps_texture_infos"]))
@@ -372,7 +389,8 @@ def format_summary(summary: dict[str, object]) -> str:
     for item in summary["top_pass_signatures"]:
         lines.append(
             "  #{rank}: draws={draws} ({share:.1%}), vs={vs_hash}, ps={ps_hash}, "
-            "primitive={primitive}, indexed={indexed}, indices={min_index_count}..{max_index_count}, "
+            "primitive={primitive_name}({primitive}), indexed={indexed}, "
+            "indices={min_index_count}..{max_index_count}, "
             "surface={rb_surface_info}, color0={rb_color_info0}, depth={rb_depth_info}".format(
                 **item
             )

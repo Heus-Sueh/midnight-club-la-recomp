@@ -1,0 +1,213 @@
+diff --git i/include/rex/graphics/shared_memory.h w/include/rex/graphics/shared_memory.h
+index c12f81b..87c36bd 100644
+--- i/include/rex/graphics/shared_memory.h
++++ w/include/rex/graphics/shared_memory.h
+@@ -11,6 +11,7 @@
+  */
+ 
+ #include <cstdint>
++#include <memory>
+ #include <mutex>
+ #include <utility>
+ #include <vector>
+@@ -141,8 +142,17 @@ class SharedMemory {
+       const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) = 0;
+ 
+  private:
++  struct PhysicalRangeTrace;
++
++  void TracePhysicalRangeEvent(const char* event, uint32_t range_start,
++                               uint32_t range_length,
++                               uint32_t affected_start,
++                               uint32_t affected_length, bool hash_target);
++
+   memory::Memory& memory_;
+ 
++  std::unique_ptr<PhysicalRangeTrace> physical_range_trace_;
++
+   // Log2 of invalidation granularity (the system page size, but the dependency
+   // on it is not hard - the access callback takes a range as an argument, and
+   // touched pages of the buffer of this size will be invalidated).
+diff --git i/src/graphics/shared_memory.cpp w/src/graphics/shared_memory.cpp
+index 1c6b459..e86df02 100644
+--- i/src/graphics/shared_memory.cpp
++++ w/src/graphics/shared_memory.cpp
+@@ -10,13 +10,17 @@
+  */
+ 
+ #include <algorithm>
++#include <cinttypes>
++#include <cstdio>
+ #include <cstring>
++#include <mutex>
+ #include <utility>
+ 
+ #include <rex/assert.h>
+ #include <rex/bit.h>
+ #include <rex/cvar.h>
+ #include <rex/dbg.h>
++#include <rex/filesystem.h>
+ #include <rex/graphics/shared_memory.h>
+ #include <rex/math.h>
+ #include <rex/memory.h>
+@@ -26,8 +30,34 @@ REXCVAR_DEFINE_INT32(
+     "Maximum aligned page span invalidated by a physical-memory access callback")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++REXCVAR_DEFINE_STRING(gpu_physical_range_trace, "", "GPU",
++                      "CSV path for physical GPU-memory provenance tracing; empty disables it")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_INT32(gpu_physical_range_trace_start, 0, "GPU",
++                     "Physical start address for GPU-memory provenance tracing")
++    .range(0, 0x1FFFFFFF)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_INT32(gpu_physical_range_trace_length, 0, "GPU",
++                     "Physical byte length for GPU-memory provenance tracing; zero disables it")
++    .range(0, 0x1FFFFFFF)
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ namespace rex::graphics {
+ 
++struct SharedMemory::PhysicalRangeTrace {
++  ~PhysicalRangeTrace() {
++    if (file) {
++      std::fclose(file);
++    }
++  }
++
++  FILE* file = nullptr;
++  std::mutex mutex;
++  uint64_t sequence = 0;
++  uint32_t start = 0;
++  uint32_t length = 0;
++};
++
+ SharedMemory::SharedMemory(memory::Memory& memory) : memory_(memory) {
+   page_size_log2_ = rex::log2_ceil(uint32_t(rex::memory::page_size()));
+ }
+@@ -39,6 +69,34 @@ SharedMemory::~SharedMemory() {
+ void SharedMemory::InitializeCommon() {
+   access_invalidation_page_limit_ = uint32_t(
+       std::clamp(REXCVAR_GET(shared_memory_access_invalidation_pages), int32_t(1), int32_t(64)));
++  const std::string& physical_range_trace_path =
++      REXCVAR_GET(gpu_physical_range_trace);
++  const uint32_t physical_range_trace_start =
++      uint32_t(REXCVAR_GET(gpu_physical_range_trace_start));
++  const uint32_t physical_range_trace_length = std::min(
++      uint32_t(REXCVAR_GET(gpu_physical_range_trace_length)),
++      kBufferSize - physical_range_trace_start);
++  if (!physical_range_trace_path.empty() && physical_range_trace_length) {
++    physical_range_trace_ = std::make_unique<PhysicalRangeTrace>();
++    physical_range_trace_->start = physical_range_trace_start;
++    physical_range_trace_->length = physical_range_trace_length;
++    physical_range_trace_->file = rex::filesystem::OpenFile(
++        rex::to_path(physical_range_trace_path), "w");
++    if (!physical_range_trace_->file) {
++      REXGPU_ERROR("Unable to open physical GPU-memory range trace output");
++      physical_range_trace_.reset();
++    } else {
++      std::fputs(
++          "sequence,event,target_start,target_length,range_start,range_length,"
++          "affected_start,affected_length,target_hash\n",
++          physical_range_trace_->file);
++      std::fflush(physical_range_trace_->file);
++      REXGPU_INFO(
++          "Physical GPU-memory range trace started for 0x{:08X}..0x{:08X}",
++          physical_range_trace_start,
++          physical_range_trace_start + physical_range_trace_length - 1);
++    }
++  }
+   num_system_page_flags_ = ((kBufferSize >> page_size_log2_) + 63) / 64;
+   system_page_flags_valid_.assign(num_system_page_flags_, 0);
+   system_page_flags_valid_and_gpu_written_.assign(num_system_page_flags_, 0);
+@@ -47,6 +105,55 @@ void SharedMemory::InitializeCommon() {
+       memory_.RegisterPhysicalMemoryInvalidationCallback(MemoryInvalidationCallbackThunk, this);
+ }
+ 
++void SharedMemory::TracePhysicalRangeEvent(
++    const char* event, uint32_t range_start, uint32_t range_length,
++    uint32_t affected_start, uint32_t affected_length, bool hash_target) {
++  PhysicalRangeTrace* trace = physical_range_trace_.get();
++  if (!trace || !range_length) {
++    return;
++  }
++  const uint64_t range_end = uint64_t(range_start) + range_length;
++  const uint64_t target_end = uint64_t(trace->start) + trace->length;
++  if (range_start >= target_end || range_end <= trace->start) {
++    return;
++  }
++
++  uint64_t target_hash = 0;
++  if (hash_target) {
++    target_hash = UINT64_C(14695981039346656037);
++    const uint8_t* target = memory_.TranslatePhysical<const uint8_t*>(trace->start);
++    for (uint32_t i = 0; i < trace->length; ++i) {
++      target_hash ^= target[i];
++      target_hash *= UINT64_C(1099511628211);
++    }
++  }
++
++  std::lock_guard lock(trace->mutex);
++  const uint64_t sequence = trace->sequence++;
++  std::fprintf(trace->file,
++               "%" PRIu64 ",%s,0x%08X,%u,0x%08X,%u,0x%08X,%u,",
++               sequence, event, trace->start, trace->length,
++               range_start, range_length, affected_start, affected_length);
++  if (hash_target) {
++    std::fprintf(trace->file, "0x%016" PRIX64, target_hash);
++  }
++  std::fputc('\n', trace->file);
++  std::fflush(trace->file);
++  if (hash_target) {
++    REXGPU_INFO(
++        "Physical range trace event {}: {} range=0x{:08X}+{} "
++        "affected=0x{:08X}+{} target_hash=0x{:016X}",
++        sequence, event, range_start, range_length, affected_start,
++        affected_length, target_hash);
++  } else {
++    REXGPU_INFO(
++        "Physical range trace event {}: {} range=0x{:08X}+{} "
++        "affected=0x{:08X}+{}",
++        sequence, event, range_start, range_length, affected_start,
++        affected_length);
++  }
++}
++
+ void SharedMemory::InitializeSparseHostGpuMemory(uint32_t granularity_log2) {
+   assert_true(granularity_log2 <= kBufferSizeLog2);
+   assert_true(host_gpu_memory_sparse_granularity_log2_ == UINT32_MAX);
+@@ -271,6 +378,8 @@ void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
+   uint32_t page_first = start >> page_size_log2_;
+   uint32_t page_last = end >> page_size_log2_;
+ 
++  TracePhysicalRangeEvent("gpu_write", start, length, start, length, false);
++
+   // Trigger modification callbacks so, for instance, resolved data is loaded to
+   // the texture.
+   FireWatches(page_first, page_last, true);
+@@ -473,6 +582,13 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+     return true;
+   }
+ 
++  for (const std::pair<uint32_t, uint32_t>& upload_range : upload_ranges_) {
++    const uint32_t upload_start = upload_range.first << page_size_log2_;
++    const uint32_t upload_length = upload_range.second << page_size_log2_;
++    TracePhysicalRangeEvent("cpu_upload", upload_start, upload_length,
++                            upload_start, upload_length, true);
++  }
++
+   return UploadRanges(upload_ranges_);
+ }
+ 
+@@ -541,6 +657,11 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+     }
+   }
+ 
++  TracePhysicalRangeEvent(
++      "cpu_invalidate", physical_address_start, length,
++      page_first << page_size_log2_,
++      (page_last - page_first + 1) << page_size_log2_, false);
++
+   for (uint32_t i = block_first; i <= block_last; ++i) {
+     uint64_t invalidate_bits = UINT64_MAX;
+     if (i == block_first) {

@@ -233,6 +233,53 @@ or CPU-coherent: a GPU resolve may update guest-visible storage without a safe
 CPU read when readback is disabled. Content lifetime and synchronization remain
 separate evidence requirements.
 
+## Physical texture provenance and phase correction
+
+The default-off physical-range trace in
+`patches/rexglue-physical-range-trace.patch` records only provenance-changing
+events for a configured physical interval: CPU uploads, CPU invalidations, and
+GPU writes/resolves. At every CPU upload it hashes the complete target interval
+before the Vulkan copy. It does not read GPU-authored contents or add a GPU
+wait. Analyze a capture with:
+
+```sh
+just analyze-physical-range out/build/linux-amd64-release/physical-range.csv
+```
+
+For `0x1BB40000..0x1BB4FFFF`, an initial 20-second capture observed one 64 KiB
+CPU upload with hash `0x1481FA8BE80BB052`, no CPU invalidation, and no GPU
+write. The upload occurred while the three-frame dominant-strip trace was
+active. This proves that the intro pass can obtain its DXT3 contents from guest
+physical memory without GPU readback.
+
+A later 50-second capture observed 12 CPU invalidations, 90 page-range uploads,
+12 complete-range hashes, and still zero GPU writes. The multiple upload rows
+per hash are partial page ranges requested after one invalidation; they do not
+represent 90 independent texture versions. The interval is therefore
+CPU-authored but dynamically reused after the intro rather than immutable for
+the process lifetime.
+
+The late draw-state capture at PM4 frames 900..902 contained 19,512 draws and
+100 pass signatures. It had no resolved texture descriptor referencing
+`0x1BB40000`, and the original shader pair produced only 53 draws with other
+primitive/count combinations. The original 1,625 four-vertex strip signature
+was absent. Its CPU batch remains a valid migration prototype, but it is not a
+credible gameplay-performance target.
+
+The late active 3D scene instead had two dominant signatures:
+
+- 8,722 auto-indexed quad-list draws (44.7%),
+  `VS 0x4D181C0D99016B72` / `PS 0xEEFF113E5FD82321`;
+- 7,108 indexed triangle-list draws (36.4%),
+  `VS 0x3B5E093D268B22F5` / `PS 0x93307A3906A73EF9`.
+
+Together they account for 81.1% of the late capture. The quad-list pass has 49
+vertex-fetch states and 28 resolved pixel-texture states, while the triangle
+pass has 1,189 vertex-fetch states and 483 texture states. The quad-list pass is
+the narrower next correlation target. This late scene is not yet a controlled
+gameplay benchmark; repeat it with deterministic gameplay input before making
+performance claims.
+
 The command trace maps exactly to the high-level hook: the first active scene
 frame contained 1,628 `0x8241CD88` records, while the dominant shader pair
 contained 1,625 four-vertex triangle strips and three six-vertex triangle
@@ -334,6 +381,10 @@ just analyze-present out/build/linux-amd64-release/logs/<log>.log 0
   batch and topology conversion are now proven; texture-content ownership,
   render-target synchronization, and offscreen image comparison remain before
   any native submission or suppression.
+- The strip prototype is now classified as an intro-path proof rather than the
+  next FPS target. Continue native migration from the late-scene quad-list pass
+  only after correlating it to a high-level RAGE boundary and repeating the
+  capture in controlled gameplay.
 - A native draw is not safe until its shader, vertex/index data, constants,
   textures, render targets, viewport/scissor, synchronization, and fallback
   contract are known.

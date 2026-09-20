@@ -208,6 +208,14 @@ contract, but do not read or upload them until their producer and coherence
 boundary are proven. With GPU readback disabled, a stable CPU-side address is
 not evidence that GPU-resolved contents are visible to the CPU.
 
+For a CPU-authored texture, the safe diagnostic hash point is immediately
+before the backend copies guest physical pages into its Vulkan upload buffer.
+Track CPU invalidation and GPU-write provenance separately. Never insert a GPU
+wait merely to fingerprint a candidate: if a range is GPU-authored, preserve
+the emulated resource or design explicit interop instead of reading stale guest
+RAM. Partial page uploads may repeat one full-range hash and should be
+coalesced logically by invalidation/version, not counted as distinct textures.
+
 Mirror the complete output-merger contract in an offscreen prototype: color
 write masks, separate color/alpha blend factors and operations, alpha testing,
 depth compare/write, stencil, target formats, MSAA, viewport, and scissor. Xbox

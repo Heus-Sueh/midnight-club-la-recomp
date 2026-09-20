@@ -114,6 +114,22 @@ fetch layout is substantially stronger than frequency alone. Record the scene
 and executable revision; boot/intro evidence must not be generalized to
 gameplay without another capture.
 
+Before spending implementation effort on a statistically dominant pass,
+capture at least one later active-scene window. Boot and intro renderers often
+repeat a simple overlay thousands of times and then disappear completely. A
+CPU batch can still be a valuable architecture proof, but it must not remain
+the FPS target when a later trace shows different shader pairs, topology, and
+resource diversity. Report both the early-pass disappearance and the new
+late-scene coverage so the migration queue follows measured runtime value.
+
+To classify a physical texture range, observe provenance transitions rather
+than hashing it on every draw. Record CPU-to-GPU uploads at the coherent copy
+boundary, CPU invalidations, and GPU writes/resolves. Hash CPU data immediately
+before upload; never hash guest RAM to infer GPU-authored contents when readback
+is disabled. Multiple page uploads with the same complete-range hash may be one
+version requested in pieces, so count unique hashes and invalidations in
+addition to raw upload events.
+
 Before a native submission, make a compare-only CPU batch falsifiable. Filter
 on the complete proven signature rather than a shader hash alone, decode guest
 endianness explicitly, reject malformed or non-finite inputs, and retain source
