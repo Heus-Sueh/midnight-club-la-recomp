@@ -137,7 +137,9 @@ registers = ["r3", "r4", "r5"]
 # emit more than one conditional packet, so these counts select the next exact
 # emission site to instrument; they are not native draw records. The three
 # hooks with register lists below have proven entry contracts and also publish
-# raw draw records.
+# draw records. At 0x8241D230, r4 is the primitive and r6 is the auto-indexed
+# draw count. At 0x8241D620, r4 is the primitive and r7 is the explicit-index
+# draw count. These contracts were correlated with the final PM4 trace.
 [[midasm_hook]]
 address = 0x82413068
 name = "mcla_draw_builder_82413068_hook"

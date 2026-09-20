@@ -96,6 +96,7 @@ TEXTURE_FORMAT_NAMES = {
     49: "DXN",
 }
 ENDIAN_NAMES = {0: "none", 1: "8in16", 2: "8in32", 3: "16in32"}
+FETCH_TYPE_NAMES = {0: "invalid_texture", 1: "invalid_vertex", 2: "texture", 3: "vertex"}
 DIMENSION_NAMES = {0: "1D", 1: "2D", 2: "3D", 3: "cube"}
 FILTER_NAMES = {0: "point", 1: "linear", 2: "base_map", 3: "fetch_const"}
 CLAMP_NAMES = {
@@ -190,6 +191,35 @@ def parse_texture_infos(value: str) -> list[dict[str, object]]:
             "dimension_name": DIMENSION_NAMES.get(numbers["dimension"], "unknown"),
         })
     return textures
+
+
+def parse_vertex_fetches(value: str) -> list[dict[str, object]]:
+    """Decode raw Xenos vertex-fetch constants from one trace cell."""
+    fetches: list[dict[str, object]] = []
+    if not value:
+        return fetches
+    for binding in value.split(";"):
+        index_text, encoded = binding.split(":", 1)
+        if len(encoded) != 16:
+            raise ValueError(f"invalid vertex fetch binding: {binding}")
+        dword_0 = int(encoded[:8], 16)
+        dword_1 = int(encoded[8:], 16)
+        fetch_type = dword_0 & 0x3
+        endian = dword_1 & 0x3
+        size_words = (dword_1 >> 2) & 0xFFFFFF
+        fetches.append({
+            "binding": int(index_text, 0),
+            "type": fetch_type,
+            "type_name": FETCH_TYPE_NAMES.get(fetch_type, "unknown"),
+            "address": dword_0 & ~0x3,
+            "size_words": size_words,
+            "size_bytes": size_words * 4,
+            "endian": endian,
+            "endian_name": ENDIAN_NAMES.get(endian, "unknown"),
+            "dword_0": dword_0,
+            "dword_1": dword_1,
+        })
+    return fetches
 
 
 def parse_samplers(value: str) -> list[dict[str, object]]:
@@ -334,6 +364,28 @@ def summarize(rows: Iterable[dict[str, str]], top: int = 10) -> dict[str, object
             item["resolved_ps_textures"] = parse_texture_infos(
                 next(iter(resources["ps_texture_infos"]))
             )
+        vertex_fetches = {
+            (
+                fetch["binding"], fetch["address"], fetch["size_bytes"],
+                fetch["endian"], fetch["type"],
+            )
+            for state in resources["vertex_fetches"]
+            for fetch in parse_vertex_fetches(state)
+        }
+        if vertex_fetches:
+            item["resolved_vertex_fetches"] = [
+                {
+                    "binding": binding,
+                    "address": address,
+                    "size_bytes": size_bytes,
+                    "endian": endian,
+                    "endian_name": ENDIAN_NAMES.get(endian, "unknown"),
+                    "type": fetch_type,
+                    "type_name": FETCH_TYPE_NAMES.get(fetch_type, "unknown"),
+                }
+                for binding, address, size_bytes, endian, fetch_type
+                in sorted(vertex_fetches)
+            ]
         if len(resources["ps_samplers"]) == 1:
             item["resolved_ps_samplers"] = parse_samplers(
                 next(iter(resources["ps_samplers"]))
@@ -401,6 +453,22 @@ def format_summary(summary: dict[str, object]) -> str:
                 "{dimension_name} tiled={tiled} pitch={pitch} endian={endian_name} "
                 "base=0x{base_address:08X} base_size={base_size} "
                 "mip=0x{mip_address:08X}+{mip_size}".format(**texture)
+            )
+        vertex_fetches = item.get("resolved_vertex_fetches", [])
+        if vertex_fetches:
+            bindings = sorted({fetch["binding"] for fetch in vertex_fetches})
+            endians = sorted({fetch["endian_name"] for fetch in vertex_fetches})
+            lines.append(
+                "      vertex buffers: bindings={}, unique={}, address=0x{:08X}..0x{:08X}, "
+                "size={}..{} bytes, endian={}".format(
+                    "/".join(str(binding) for binding in bindings),
+                    len(vertex_fetches),
+                    min(fetch["address"] for fetch in vertex_fetches),
+                    max(fetch["address"] for fetch in vertex_fetches),
+                    min(fetch["size_bytes"] for fetch in vertex_fetches),
+                    max(fetch["size_bytes"] for fetch in vertex_fetches),
+                    "/".join(endians),
+                )
             )
         for sampler in item.get("resolved_ps_samplers", []):
             lines.append(

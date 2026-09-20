@@ -77,6 +77,7 @@ flowchart TD
 | **Final Draw-State Trace** | **Complete** | A bounded SDK trace records final state plus SDK-resolved texture/sampler resources and blend state. Three measured PM4 frames reproduced the dominant pass at exactly 1,625 draws per frame. |
 | **Dominant Strip CPU Batch** | **Complete** | A default-off compare path decodes `k8in32` vertices and converts 1,625 independent strips into 6,500 vertices and 9,750 ordered indices without submitting GPU work. |
 | **Texture Provenance** | **Complete for intro pass** | `0x1BB40000..0x1BB4FFFF` is CPU-uploaded with no observed GPU writes. It is stable during the intro pass, then dynamically reused by CPU updates. |
+| **Late Quad Boundary** | **Complete** | `0x8241D230` accounts for 100% of the logical dominant quad-list pass in two bounded correlations. Xenos replays every logical draw across two vertical eDRAM windows. |
 | **Frame Pacing** | **Complete** | High-precision monotonic pacing attached to the host clock at `grcDevice::Present`. |
 | **Swap Interception** | **Complete** | Deterministic `mcla_native_present_hook` at `0x8241A0E4` (generated output `generated/default/midnight_club_la_recomp.68.cpp`, not tracked). |
 | **1080p Presentation** | **Complete** | Guest eDRAM remains at 720p while the host window presents at 1080p. |
@@ -187,6 +188,17 @@ commands can eventually map to native Vulkan textures and pipelines.
     indexed triangle lists using `VS 0x3B5E093D268B22F5` /
     `PS 0x93307A3906A73EF9` contributed 36.4%. The narrower quad-list pass is the
     next active-scene correlation target.
+  - The project-owned bounded RAGE trace promoted `0x8241D230`: `r4` is the
+    primitive type and `r6` is the auto-indexed count. In a three-frame
+    correlation it produced 254 quad-list records, exactly matching the 254
+    logical target draws after collapsing the 508 PM4 rows into two vertical
+    eDRAM tile replays. A second 30-Present window repeated 159/159 logical
+    matches with 100% candidate precision and zero frame offset.
+  - Both PM4 halves preserve the complete shader, resource, constant, and draw
+    sequence. Only `PA_SC_WINDOW_OFFSET`, `PA_SC_WINDOW_SCISSOR_TL`, and
+    `PA_SC_WINDOW_SCISSOR_BR` differ: the first window covers rows 0..511 and
+    the second covers rows 512..719. Native migration must count logical draws,
+    not the replayed PM4 total.
 
 ---
 
@@ -247,17 +259,21 @@ gantt
 
 ### Next Priorities
 
-1. **Correlate the late-scene quad-list pass**
-   - Locate its high-level RAGE submission boundary, prove vertex/count/layout
-     contracts, and repeat the capture in a deterministic gameplay route. Keep
-     the emulated path authoritative.
+1. **Capture the quad-list vertex/resource contract**
+   - At `0x8241D230`, associate each logical draw with vertex fetch 95, shader
+     constants, and texture descriptors at a coherent boundary. Prove the
+     32-byte vertex layout and resource lifetimes before copying data.
 2. **Build a compare-only CPU batch for the quad-list pass**
-   - Preserve draw order and per-material resources; do not generalize the
-     intro strip batch to different topology or lifetime rules.
-3. **Submit a proven batch to an offscreen Vulkan comparison target**
+   - Preserve logical draw order and per-material resources, and collapse the
+     two eDRAM tile replays. Do not generalize the intro strip batch to this
+     different topology or lifetime contract.
+3. **Repeat in a deterministic gameplay route**
+   - Confirm the boundary coverage, tile factor, and resource layout outside
+     the automatic active scene before making FPS claims.
+4. **Submit a proven batch to an offscreen Vulkan comparison target**
    - Upload native vertices, indices, and CPU-authored textures without touching
      the displayed Xenos framebuffer.
-4. **Validate gameplay and image parity**
+5. **Validate gameplay and image parity**
    - Repeat the correlation in a controlled gameplay scene, image-compare the
      native pass, retain Xenos for every unknown operation, and suppress an
      emulated draw only after parity and fallback recovery are validated.

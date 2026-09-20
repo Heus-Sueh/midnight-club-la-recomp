@@ -280,6 +280,57 @@ the narrower next correlation target. This late scene is not yet a controlled
 gameplay benchmark; repeat it with deterministic gameplay input before making
 performance claims.
 
+## Late quad-list RAGE boundary and eDRAM replay
+
+The bounded project-side trace added three default-off controls:
+
+```text
+mcla_native_draw_trace
+mcla_native_draw_trace_start_present
+mcla_native_draw_trace_present_count
+```
+
+It records promoted RAGE builder arguments only at the immutable Present
+boundary. It adds no GPU wait and does not suppress or replace a draw. Correlate
+it with the final command-processor trace using:
+
+```sh
+just analyze-native-draws out/build/linux-amd64-release/native-draws.csv \
+  --gpu-trace out/build/linux-amd64-release/draw-state.csv \
+  --vs 0x4D181C0D99016B72 --ps 0xEEFF113E5FD82321
+```
+
+Focused Ghidra exports eliminated the apparent `DRAW_INDX_2` candidates:
+`0x82417538`, `0x82422488`, `0x824225E0`, and `0x8242DE08` build command-list
+templates or state sequences; `0x82418350` emits rectangle lists; and the
+dedicated `0x82427898` builder had zero calls during the measured active scene.
+The decompiled packet construction at `0x8241D230` instead proves `r4 & 0x3F`
+is the primitive and `r6` is the auto-indexed draw count. `0x8241D620` uses
+`r4` for the primitive and `r7` for an explicit-index draw count.
+
+In the first simultaneous three-frame capture, Presents 900..902 contained 254
+`0x8241D230` quad-list records. The target shader pair appeared in 508 PM4 rows.
+The PM4 sequence consists of two equal 254-draw chunks: every field is equal
+except `PA_SC_WINDOW_OFFSET`, `PA_SC_WINDOW_SCISSOR_TL`, and
+`PA_SC_WINDOW_SCISSOR_BR`. The first chunk covers `(0,0)..(1280,512)`; the
+second covers `(0,512)..(1280,720)` with a negative Y window offset. This is
+two-window eDRAM tile replay, not 508 independent RAGE submissions.
+
+After collapsing that replay, the analyzer matched 254/254 logical draws to
+`0x8241D230`, with 100% coverage, 100% candidate precision, and frame offset
+zero. A second capture retained 30 surrounding Presents and independently
+matched 159/159 logical target draws with the same precision, offset, and 2x
+replay factor. This promotes `0x8241D230` as the high-level boundary for the
+dominant late quad-list pass in the measured automatic active scene.
+
+The target vertex shader uses one fetch with an eight-dword (32-byte) stride:
+`float3` at word 0, an `8_8_8_8` mini-fetch at word 3, and another
+`8_8_8_8` mini-fetch at word 4. The trace resolves it through vertex-fetch
+binding 95 with `8in32` endianness. One bounded capture contained 37 unique
+buffer descriptors spanning physical addresses `0x0E11ED90..0x0FB94000` and
+sizes 96..453,216 bytes. These descriptors and shader layout identify the next
+capture target; they do not yet prove content lifetime or a safe copy point.
+
 The command trace maps exactly to the high-level hook: the first active scene
 frame contained 1,628 `0x8241CD88` records, while the dominant shader pair
 contained 1,625 four-vertex triangle strips and three six-vertex triangle
@@ -382,9 +433,9 @@ just analyze-present out/build/linux-amd64-release/logs/<log>.log 0
   render-target synchronization, and offscreen image comparison remain before
   any native submission or suppression.
 - The strip prototype is now classified as an intro-path proof rather than the
-  next FPS target. Continue native migration from the late-scene quad-list pass
-  only after correlating it to a high-level RAGE boundary and repeating the
-  capture in controlled gameplay.
+  next FPS target. The late-scene quad-list pass is correlated to `0x8241D230`;
+  next prove vertex/resource lifetime and repeat the result in controlled
+  gameplay before building the compare-only batch.
 - A native draw is not safe until its shader, vertex/index data, constants,
   textures, render targets, viewport/scissor, synchronization, and fallback
   contract are known.

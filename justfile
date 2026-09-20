@@ -93,3 +93,7 @@ analyze-draw-state trace top="10":
 # Classify the producer of a bounded physical GPU-memory range trace.
 analyze-physical-range trace:
     "{{ python }}" scripts/analyze_physical_range_trace.py "{{ trace }}"
+
+# Rank RAGE draw builders and optionally correlate them with a GPU pass.
+analyze-native-draws trace *args:
+    "{{ python }}" scripts/analyze_native_draw_trace.py "{{ trace }}" {{ args }}

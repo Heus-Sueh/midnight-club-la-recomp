@@ -1,6 +1,8 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
+#include <fstream>
 #include <memory>
 #include <string>
 
@@ -11,6 +13,7 @@
 namespace mcla {
 
 struct NativeStripBatch;
+struct NativeFrameScene;
 
 // CVars for tuning native presentation.
 REXCVAR_DECLARE(bool, mcla_use_native_renderer);
@@ -24,6 +27,9 @@ REXCVAR_DECLARE(bool, mcla_use_fsi);
 REXCVAR_DECLARE(bool, mcla_interpolate_camera);
 REXCVAR_DECLARE(bool, mcla_native_scene_capture);
 REXCVAR_DECLARE(bool, mcla_native_batch_compare);
+REXCVAR_DECLARE(std::string, mcla_native_draw_trace);
+REXCVAR_DECLARE(int32_t, mcla_native_draw_trace_start_present);
+REXCVAR_DECLARE(int32_t, mcla_native_draw_trace_present_count);
 REXCVAR_DECLARE(int32_t, mcla_capture_present);
 REXCVAR_DECLARE(std::string, mcla_capture_path);
 
@@ -44,6 +50,7 @@ class NativeRenderer {
 
   void SampleGuestCamera();
   void CaptureDiagnosticFrame();
+  void TraceNativeDraws(const NativeFrameScene& scene);
 
   rex::Runtime* runtime_ = nullptr;
   rex::ui::Window* window_ = nullptr;
@@ -51,6 +58,7 @@ class NativeRenderer {
   uint64_t guest_frame_count_ = 0;
   uint64_t total_guest_frame_count_ = 0;
   bool diagnostic_frame_captured_ = false;
+  std::ofstream native_draw_trace_;
   std::shared_ptr<const NativeStripBatch> latest_native_batch_;
   std::chrono::steady_clock::time_point next_present_time_{};
   std::chrono::steady_clock::time_point last_report_time_{};

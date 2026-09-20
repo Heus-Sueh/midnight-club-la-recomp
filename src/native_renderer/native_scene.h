@@ -14,11 +14,10 @@ class Memory;
 
 namespace mcla {
 
-// Raw arguments observed at proven RAGE draw entry points. Keep them undecoded
-// until their semantics have been correlated with command processor traces;
-// this prevents an early guess from becoming renderer ABI. packet_word is zero
-// when the final value also depends on device state not present at function
-// entry.
+// Arguments observed at proven RAGE draw entry points. Fields stay raw until
+// their semantics are correlated with command-processor traces; promoted
+// topology and count fields below have passed that check. packet_word is zero
+// when the final value also depends on device state not present at entry.
 struct NativeDrawRecord {
   static constexpr uint32_t kInvalidVertexDataOffset = UINT32_MAX;
 
@@ -30,6 +29,12 @@ struct NativeDrawRecord {
   uint32_t argument_r6 = 0;
   uint32_t argument_r7 = 0;
   uint32_t packet_word = 0;
+
+  // Semantics proven from the packet construction at each promoted builder.
+  // index_count names the VGT draw count for both auto-indexed and explicit
+  // index-buffer draws; indexed distinguishes the two sources.
+  uint32_t index_count = 0;
+  bool indexed = false;
 
   // Proven contract for the DrawPrimitiveUP-style builder at 0x8241CD88.
   // The return hook observes the guest allocation address after the builder
@@ -87,7 +92,8 @@ class NativeSceneCapture {
   void ObserveBuilderCall(uint32_t source_address);
   std::vector<NativeBuilderActivity> DrainBuilderActivity();
   std::shared_ptr<const NativeFrameScene> PublishFrame(
-      uint64_t guest_present, rex::memory::Memory* memory);
+      uint64_t guest_present, rex::memory::Memory* memory,
+      bool capture_vertex_data = true);
   std::shared_ptr<const NativeFrameScene> AcquireLatest() const;
   void Reset();
 

@@ -22,7 +22,8 @@ namespace {
 
 bool IsNativeSceneCaptureEnabled() {
   return mcla::FLAGS_mcla_native_scene_capture_storage_() ||
-         mcla::FLAGS_mcla_native_batch_compare_storage_();
+         mcla::FLAGS_mcla_native_batch_compare_storage_() ||
+         !mcla::FLAGS_mcla_native_draw_trace_storage_().empty();
 }
 
 }  // namespace
@@ -132,6 +133,22 @@ REXCVAR_DEFINE_BOOL(mcla_native_batch_compare, false, "Graphics/Native Renderer"
                     "Build the compare-only CPU batch for the dominant strip pass")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_STRING(mcla_native_draw_trace, "", "Graphics/Native Renderer",
+                      "CSV path for bounded RAGE draw-builder tracing; empty disables it")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_INT32(mcla_native_draw_trace_start_present, 1,
+                     "Graphics/Native Renderer",
+                     "First absolute guest Present included in the RAGE draw trace")
+    .range(1, 1000000)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_INT32(mcla_native_draw_trace_present_count, 3,
+                     "Graphics/Native Renderer",
+                     "Number of guest Presents included in the RAGE draw trace")
+    .range(1, 1000)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 REXCVAR_DEFINE_INT32(mcla_capture_present, 0, "Graphics/Diagnostics",
                      "Capture the first guest output at or after this absolute "
                      "Present number (0 = disabled)")
@@ -232,6 +249,24 @@ void NativeRenderer::Initialize(rex::Runtime* runtime, rex::ui::Window* window) 
   window_ = window;
   initialized_ = true;
 
+  const std::string& native_draw_trace_path =
+      REXCVAR_GET(mcla_native_draw_trace);
+  if (!native_draw_trace_path.empty()) {
+    native_draw_trace_.open(native_draw_trace_path,
+                            std::ios::out | std::ios::trunc);
+    if (native_draw_trace_) {
+      native_draw_trace_
+          << "guest_present,draw,source_address,packet_header,"
+             "device_guest_address,argument_r4,argument_r5,argument_r6,"
+             "argument_r7,packet_word,primitive,index_count,indexed\n";
+      native_draw_trace_.flush();
+      REXLOG_INFO("[NativeRenderer] RAGE draw trace started at {}", native_draw_trace_path);
+    } else {
+      REXLOG_ERROR("[NativeRenderer] Failed to open RAGE draw trace: {}",
+                   native_draw_trace_path);
+    }
+  }
+
   if (REXCVAR_GET(mcla_dump_shaders)) {
     rex::cvar::SetFlagByName("dump_shaders", "shaders_dump");
     REXLOG_INFO("[NativeRenderer] Shader microcode extraction pipeline active -> shaders_dump/");
@@ -301,10 +336,15 @@ void NativeRenderer::OnGuestPresent() {
   ++guest_frame_count_;
   ++total_guest_frame_count_;
 
-  if (REXCVAR_GET(mcla_native_scene_capture) ||
-      REXCVAR_GET(mcla_native_batch_compare)) {
+  if (IsNativeSceneCaptureEnabled()) {
+    const bool capture_vertex_data =
+        REXCVAR_GET(mcla_native_scene_capture) ||
+        REXCVAR_GET(mcla_native_batch_compare);
     const auto scene = NativeSceneCapture::Get().PublishFrame(
-        total_guest_frame_count_, runtime_ ? runtime_->memory() : nullptr);
+        total_guest_frame_count_,
+        capture_vertex_data && runtime_ ? runtime_->memory() : nullptr,
+        capture_vertex_data);
+    TraceNativeDraws(*scene);
     if (REXCVAR_GET(mcla_native_batch_compare)) {
       latest_native_batch_ = std::make_shared<const NativeStripBatch>(
           BuildDominantStripBatch(*scene));
@@ -406,6 +446,33 @@ void NativeRenderer::OnGuestPresent() {
   next_present_time_ += interval;
 }
 
+void NativeRenderer::TraceNativeDraws(const NativeFrameScene& scene) {
+  if (!native_draw_trace_) {
+    return;
+  }
+  const uint64_t first_present = static_cast<uint64_t>(
+      REXCVAR_GET(mcla_native_draw_trace_start_present));
+  const uint64_t present_count = static_cast<uint64_t>(
+      REXCVAR_GET(mcla_native_draw_trace_present_count));
+  if (scene.guest_present < first_present ||
+      scene.guest_present - first_present >= present_count) {
+    return;
+  }
+
+  for (size_t draw_index = 0; draw_index < scene.draws.size(); ++draw_index) {
+    const NativeDrawRecord& draw = scene.draws[draw_index];
+    native_draw_trace_
+        << scene.guest_present << ',' << draw_index << ",0x" << std::hex
+        << draw.source_address << ",0x" << draw.packet_header << ",0x"
+        << draw.device_guest_address << ",0x" << draw.argument_r4 << ",0x"
+        << draw.argument_r5 << ",0x" << draw.argument_r6 << ",0x"
+        << draw.argument_r7 << ",0x" << draw.packet_word << std::dec << ','
+        << draw.primitive_type << ',' << draw.index_count << ','
+        << (draw.indexed ? 1 : 0) << '\n';
+  }
+  native_draw_trace_.flush();
+}
+
 void NativeRenderer::CaptureDiagnosticFrame() {
   rex::ui::Presenter* presenter =
       runtime_ && runtime_->graphics_system() ? runtime_->graphics_system()->presenter() : nullptr;
@@ -464,6 +531,9 @@ void NativeRenderer::Shutdown() {
   guest_frame_count_ = 0;
   total_guest_frame_count_ = 0;
   diagnostic_frame_captured_ = false;
+  if (native_draw_trace_.is_open()) {
+    native_draw_trace_.close();
+  }
   latest_native_batch_.reset();
   NativeSceneCapture::Get().Reset();
 }

@@ -133,6 +133,9 @@ just analyze-present /path/to/run.log 25
 just analyze-queue /path/to/run.log
 just analyze-memory /path/to/run.log
 just analyze-samples /tmp/mcla-gpu-samples.csv
+just analyze-draw-state /path/to/draw-state.csv 10
+just analyze-native-draws /path/to/native-draws.csv \
+  --gpu-trace /path/to/draw-state.csv --vs 0x... --ps 0x...
 ```
 
 `profile` is Linux-only; the build, extraction and analysis recipes also support

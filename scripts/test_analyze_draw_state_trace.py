@@ -8,6 +8,7 @@ from analyze_draw_state_trace import (
     decode_blend_control,
     decode_color_depth_control,
     decode_render_target,
+    parse_vertex_fetches,
     parse_samplers,
     parse_texture_infos,
     read_trace,
@@ -16,6 +17,14 @@ from analyze_draw_state_trace import (
 
 
 class DrawStateTraceAnalysisTests(unittest.TestCase):
+    def test_decodes_vertex_fetch_constant(self) -> None:
+        fetch = parse_vertex_fetches("95:0FB74003100038C2")[0]
+        self.assertEqual(fetch["binding"], 95)
+        self.assertEqual(fetch["type_name"], "vertex")
+        self.assertEqual(fetch["address"], 0x0FB74000)
+        self.assertEqual(fetch["size_bytes"], 14528)
+        self.assertEqual(fetch["endian_name"], "8in32")
+
     def make_row(self, **overrides: str) -> dict[str, str]:
         row = {
             "frame": "120",

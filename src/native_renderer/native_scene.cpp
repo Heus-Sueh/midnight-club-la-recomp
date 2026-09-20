@@ -45,12 +45,23 @@ void NativeSceneCapture::ObserveDrawCall(
   if (source_address == kDrawPrimitiveUpBuilderAddress) {
     draw.primitive_type = argument_r4 & 0x3Fu;
     draw.vertex_count = argument_r5;
+    draw.index_count = argument_r5;
     draw.vertex_stride_bytes = argument_r6;
     const uint64_t vertex_data_size =
         static_cast<uint64_t>(argument_r5) * argument_r6;
     if (vertex_data_size <= std::numeric_limits<uint32_t>::max()) {
       draw.vertex_data_size = static_cast<uint32_t>(vertex_data_size);
     }
+  } else if (source_address == 0x8241D230) {
+    draw.primitive_type = argument_r4 & 0x3Fu;
+    draw.index_count = argument_r6;
+  } else if (source_address == 0x8241D620) {
+    draw.primitive_type = argument_r4 & 0x3Fu;
+    draw.index_count = argument_r7;
+    draw.indexed = true;
+  } else if (source_address == kDrawIndx2BuilderAddress) {
+    draw.primitive_type = argument_r4 & 0x3Fu;
+    draw.index_count = argument_r5;
   }
 }
 
@@ -89,7 +100,8 @@ std::vector<NativeBuilderActivity> NativeSceneCapture::DrainBuilderActivity() {
 }
 
 std::shared_ptr<const NativeFrameScene> NativeSceneCapture::PublishFrame(
-    uint64_t guest_present, rex::memory::Memory* memory) {
+    uint64_t guest_present, rex::memory::Memory* memory,
+    bool capture_vertex_data) {
   auto scene = std::make_shared<NativeFrameScene>();
   std::lock_guard lock(mutex_);
   scene->generation = next_generation_++;
@@ -101,7 +113,8 @@ std::shared_ptr<const NativeFrameScene> NativeSceneCapture::PublishFrame(
   scene->draws = pending_draws_;
 
   for (NativeDrawRecord& draw : scene->draws) {
-    if (draw.source_address != kDrawPrimitiveUpBuilderAddress) {
+    if (!capture_vertex_data ||
+        draw.source_address != kDrawPrimitiveUpBuilderAddress) {
       continue;
     }
     ++scene->expected_vertex_buffers;

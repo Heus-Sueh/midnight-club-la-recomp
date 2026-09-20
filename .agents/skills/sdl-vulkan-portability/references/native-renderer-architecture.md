@@ -216,6 +216,13 @@ the emulated resource or design explicit interop instead of reading stale guest
 RAM. Partial page uploads may repeat one full-range hash and should be
 coalesced logically by invalidation/version, not counted as distinct textures.
 
+Xbox 360 eDRAM tiling may replay an identical logical draw sequence for
+multiple vertical window/scissor regions. Preserve the logical RAGE ordering in
+the native scene, record the tile factor as provenance, and render the full
+native target once unless parity requires explicit tiled behavior. Do not size
+native batches, estimate savings, or claim boundary coverage from raw PM4 draw
+counts until repeated chunks have been collapsed.
+
 Mirror the complete output-merger contract in an offscreen prototype: color
 write masks, separate color/alpha blend factors and operations, alpha testing,
 depth compare/write, stencil, target formats, MSAA, viewport, and scissor. Xbox

@@ -130,6 +130,14 @@ is disabled. Multiple page uploads with the same complete-range hash may be one
 version requested in pieces, so count unique hashes and invalidations in
 addition to raw upload events.
 
+When correlating a high-level draw boundary with command-processor rows, compare
+the ordered `(frame, topology, count)` sequence rather than totals alone. A
+single logical draw stream may be replayed across multiple eDRAM tiles. Detect
+equal PM4 chunks after excluding only window-offset/scissor registers, report
+the replay factor explicitly, and collapse those chunks before computing
+boundary coverage. Otherwise a correct one-call-per-logical-draw hook appears
+to cover only half the pass and PM4 draw counts overstate migration value.
+
 Before a native submission, make a compare-only CPU batch falsifiable. Filter
 on the complete proven signature rather than a shader hash alone, decode guest
 endianness explicitly, reject malformed or non-finite inputs, and retain source
